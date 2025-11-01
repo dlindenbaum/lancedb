@@ -1,9 +1,10 @@
 """
-Hybrid Video Search System using CLIP + DINOv3 + LanceDB
+Hybrid Video Search System using CLIP + DINOv3 + Face Recognition + LanceDB
 
 This module provides a complete multimodal video search system that combines:
 - CLIP for semantic text-to-image search
 - DINOv3 for fine-grained visual features
+- Face detection and recognition
 - LanceDB for efficient vector storage and retrieval
 """
 
@@ -23,6 +24,15 @@ from tqdm import tqdm
 import lancedb
 from lancedb.embeddings import OpenClipEmbeddings
 import pyarrow as pa
+
+# Face detection imports (optional)
+try:
+    from face_embeddings import FaceEmbeddings, FaceDatabase
+    FACE_DETECTION_AVAILABLE = True
+except ImportError:
+    FACE_DETECTION_AVAILABLE = False
+    FaceEmbeddings = None
+    FaceDatabase = None
 
 
 class DINOv3Embeddings:
@@ -355,6 +365,8 @@ class HybridVideoSearch:
                  dino_model: str = "dinov2_vitb14",
                  device: str = "cuda",
                  use_dino: bool = True,
+                 use_face_detection: bool = False,
+                 face_model: str = "buffalo_l",
                  batch_size: int = 32):
         """
         Initialize hybrid video search system
@@ -366,12 +378,15 @@ class HybridVideoSearch:
             dino_model: DINOv3 model variant
             device: Device to run models on
             use_dino: Whether to use DINOv3 (disable for faster indexing)
+            use_face_detection: Whether to enable face detection
+            face_model: InsightFace model name (buffalo_l, buffalo_s, antelopev2)
             batch_size: Batch size for embedding extraction
         """
         self.db_path = db_path
         self.db = lancedb.connect(db_path)
         self.device = device if torch.cuda.is_available() else "cpu"
         self.use_dino = use_dino
+        self.use_face_detection = use_face_detection
         self.batch_size = batch_size
 
         # Initialize CLIP embeddings
@@ -388,6 +403,21 @@ class HybridVideoSearch:
                 model_name=dino_model,
                 device=self.device
             )
+
+        # Initialize face detection if enabled
+        self.face_embeddings = None
+        if use_face_detection:
+            if not FACE_DETECTION_AVAILABLE:
+                warnings.warn(
+                    "Face detection requested but dependencies not available. "
+                    "Install with: pip install insightface onnxruntime-gpu"
+                )
+            else:
+                self.face_embeddings = FaceEmbeddings(
+                    model_name=face_model,
+                    device=self.device
+                )
+                print("✓ Face detection enabled")
 
         # Initialize dense feature extractor
         self.dense_extractor = None
@@ -818,7 +848,8 @@ class HybridVideoSearch:
         stats = {
             "tables": self.db.table_names(),
             "total_frames": 0,
-            "videos": set()
+            "videos": set(),
+            "total_faces": 0
         }
 
         if "clip_embeddings" in self.db.table_names():
@@ -826,6 +857,302 @@ class HybridVideoSearch:
             df = clip_table.to_pandas()
             stats["total_frames"] = len(df)
             stats["videos"] = set(df["video_id"].unique())
+
+        if "face_embeddings" in self.db.table_names():
+            face_table = self.db.open_table("face_embeddings")
+            df_faces = face_table.to_pandas()
+            stats["total_faces"] = len(df_faces)
+
+        return stats
+
+    # ==================== Face Detection Methods ====================
+
+    def index_video_faces(self, video_path: str, video_id: str,
+                         fps: int = 2, max_frames: Optional[int] = None,
+                         min_confidence: float = 0.5,
+                         frames_dir: Optional[str] = None) -> int:
+        """
+        Index faces from a video
+
+        Args:
+            video_path: Path to video file
+            video_id: Unique identifier for the video
+            fps: Frame extraction rate
+            max_frames: Maximum number of frames to extract
+            min_confidence: Minimum face detection confidence
+            frames_dir: Directory containing pre-extracted frames (optional)
+
+        Returns:
+            Number of faces indexed
+        """
+        if not self.face_embeddings:
+            raise ValueError("Face detection not enabled. Initialize with use_face_detection=True")
+
+        # Extract frames if not provided
+        if frames_dir is None:
+            frames_dir = os.path.join(os.path.dirname(self.db_path), f"frames_{video_id}")
+            print(f"Extracting frames from {video_path}...")
+            frames_metadata = self.frame_extractor.extract_frames(
+                video_path, frames_dir, fps=fps, max_frames=max_frames
+            )
+        else:
+            # Load existing frames
+            frame_files = sorted(Path(frames_dir).glob("*.jpg"))
+            frames_metadata = []
+            for i, frame_file in enumerate(frame_files):
+                frames_metadata.append({
+                    "frame_id": i,
+                    "frame_path": str(frame_file),
+                    "timestamp": i / fps,
+                    "frame_number": i
+                })
+
+        if not frames_metadata:
+            warnings.warn(f"No frames found for face detection")
+            return 0
+
+        # Detect faces in all frames
+        print("Detecting faces in frames...")
+        face_data = []
+        total_faces = 0
+
+        for frame_meta in tqdm(frames_metadata, desc="Processing frames"):
+            frame_path = frame_meta["frame_path"]
+
+            # Detect faces
+            detections = self.face_embeddings.detect_faces(frame_path, min_confidence)
+
+            for face_idx, det in enumerate(detections):
+                face_data.append({
+                    "video_id": video_id,
+                    "frame_id": frame_meta["frame_id"],
+                    "frame_path": frame_path,
+                    "timestamp": frame_meta["timestamp"],
+                    "frame_number": frame_meta["frame_number"],
+                    "face_idx": face_idx,
+                    "bbox": det["bbox"],
+                    "confidence": det["confidence"],
+                    "face_embedding": det["embedding"],
+                    "age": det.get("age"),
+                    "gender": det.get("gender")
+                })
+                total_faces += 1
+
+        if not face_data:
+            print("No faces detected in video")
+            return 0
+
+        # Create or append to face embeddings table
+        if "face_embeddings" in self.db.table_names():
+            face_table = self.db.open_table("face_embeddings")
+            face_table.add(face_data)
+        else:
+            self.db.create_table("face_embeddings", face_data)
+
+        print(f"✓ Indexed {total_faces} faces from {len(frames_metadata)} frames")
+
+        return total_faces
+
+    def search_faces(self, query_face: Union[str, np.ndarray],
+                    min_confidence: float = 0.5,
+                    similarity_threshold: float = 0.6,
+                    limit: int = 10) -> List[Dict]:
+        """
+        Search for similar faces in the database
+
+        Args:
+            query_face: Image path or face embedding
+            min_confidence: Minimum face detection confidence (if image)
+            similarity_threshold: Minimum similarity score
+            limit: Number of results to return
+
+        Returns:
+            List of matching faces with metadata
+        """
+        if not self.face_embeddings:
+            raise ValueError("Face detection not enabled")
+
+        if "face_embeddings" not in self.db.table_names():
+            return []
+
+        # Extract query embedding if image path provided
+        if isinstance(query_face, str):
+            query_embedding = self.face_embeddings.extract_largest_face_embedding(
+                query_face, min_confidence
+            )
+            if query_embedding is None:
+                warnings.warn("No face detected in query image")
+                return []
+        else:
+            query_embedding = query_face
+
+        # Search face table
+        face_table = self.db.open_table("face_embeddings")
+        results = (
+            face_table.search(query_embedding)
+            .limit(limit * 2)  # Get more to filter by threshold
+            .to_list()
+        )
+
+        # Filter by similarity threshold and format results
+        formatted_results = []
+        for result in results:
+            similarity = float(result.get("_distance", 0.0))
+
+            if similarity >= similarity_threshold:
+                formatted_results.append({
+                    "video_id": result["video_id"],
+                    "frame_id": result["frame_id"],
+                    "frame_path": result["frame_path"],
+                    "timestamp": result["timestamp"],
+                    "frame_number": result["frame_number"],
+                    "face_idx": result["face_idx"],
+                    "bbox": result["bbox"],
+                    "confidence": result["confidence"],
+                    "similarity": similarity,
+                    "age": result.get("age"),
+                    "gender": result.get("gender")
+                })
+
+                if len(formatted_results) >= limit:
+                    break
+
+        return formatted_results
+
+    def find_person_across_video(self, reference_face: Union[str, np.ndarray],
+                                video_id: Optional[str] = None,
+                                similarity_threshold: float = 0.6,
+                                limit: int = 100) -> List[Dict]:
+        """
+        Track a person across video frames
+
+        Args:
+            reference_face: Reference image or face embedding
+            video_id: Specific video to search (or None for all)
+            similarity_threshold: Minimum similarity score
+            limit: Maximum number of results
+
+        Returns:
+            List of appearances sorted by timestamp
+        """
+        # Search for similar faces
+        results = self.search_faces(
+            reference_face,
+            similarity_threshold=similarity_threshold,
+            limit=limit
+        )
+
+        # Filter by video if specified
+        if video_id:
+            results = [r for r in results if r["video_id"] == video_id]
+
+        # Sort by timestamp
+        results = sorted(results, key=lambda x: x["timestamp"])
+
+        return results
+
+    def detect_faces_in_frame(self, frame_path: str,
+                             min_confidence: float = 0.5,
+                             visualize: bool = False,
+                             output_path: Optional[str] = None) -> List[Dict]:
+        """
+        Detect faces in a single frame
+
+        Args:
+            frame_path: Path to frame image
+            min_confidence: Minimum detection confidence
+            visualize: Whether to create visualization
+            output_path: Path to save visualization
+
+        Returns:
+            List of face detections
+        """
+        if not self.face_embeddings:
+            raise ValueError("Face detection not enabled")
+
+        detections = self.face_embeddings.detect_faces(frame_path, min_confidence)
+
+        if visualize:
+            self.face_embeddings.visualize_faces(
+                frame_path,
+                detections,
+                output_path=output_path
+            )
+
+        return detections
+
+    def extract_face_crops(self, frame_path: str,
+                          min_confidence: float = 0.5,
+                          output_dir: Optional[str] = None) -> List[Tuple[Image.Image, Dict]]:
+        """
+        Extract and optionally save face crops from a frame
+
+        Args:
+            frame_path: Path to frame image
+            min_confidence: Minimum detection confidence
+            output_dir: Optional directory to save crops
+
+        Returns:
+            List of (face_image, detection_info) tuples
+        """
+        if not self.face_embeddings:
+            raise ValueError("Face detection not enabled")
+
+        crops = self.face_embeddings.extract_face_crops(frame_path, min_confidence)
+
+        # Save crops if output directory specified
+        if output_dir and crops:
+            os.makedirs(output_dir, exist_ok=True)
+            frame_name = Path(frame_path).stem
+
+            for i, (crop_img, det) in enumerate(crops):
+                crop_path = os.path.join(output_dir, f"{frame_name}_face_{i}.jpg")
+                crop_img.save(crop_path)
+
+            print(f"✓ Saved {len(crops)} face crops to {output_dir}")
+
+        return crops
+
+    def get_face_statistics(self, video_id: Optional[str] = None) -> Dict:
+        """
+        Get face detection statistics
+
+        Args:
+            video_id: Optional video ID to filter by
+
+        Returns:
+            Dictionary with statistics
+        """
+        if "face_embeddings" not in self.db.table_names():
+            return {
+                "total_faces": 0,
+                "unique_frames": 0,
+                "avg_faces_per_frame": 0
+            }
+
+        face_table = self.db.open_table("face_embeddings")
+        df = face_table.to_pandas()
+
+        if video_id:
+            df = df[df["video_id"] == video_id]
+
+        stats = {
+            "total_faces": len(df),
+            "unique_frames": df["frame_id"].nunique(),
+            "avg_faces_per_frame": len(df) / df["frame_id"].nunique() if len(df) > 0 else 0,
+            "videos": list(df["video_id"].unique()) if not video_id else [video_id]
+        }
+
+        # Add gender distribution if available
+        if "gender" in df.columns:
+            gender_counts = df["gender"].value_counts().to_dict()
+            stats["gender_distribution"] = gender_counts
+
+        # Add age statistics if available
+        if "age" in df.columns:
+            stats["age_min"] = int(df["age"].min())
+            stats["age_max"] = int(df["age"].max())
+            stats["age_mean"] = float(df["age"].mean())
 
         return stats
 

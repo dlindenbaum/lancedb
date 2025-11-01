@@ -1,8 +1,9 @@
-# Hybrid Video Search with CLIP + DINOv3 + LanceDB
+# Hybrid Video Search with CLIP + DINOv3 + Face Recognition + LanceDB
 
 A comprehensive multimodal video search system that combines:
 - **CLIP**: Semantic text-to-image search ("American flag in background", "person wearing red")
 - **DINOv3**: Fine-grained visual features for precise object localization
+- **Face Recognition**: Detect, recognize, and track faces using InsightFace
 - **LanceDB**: High-performance vector storage and retrieval
 
 ## Features
@@ -11,23 +12,30 @@ A comprehensive multimodal video search system that combines:
 - 🎯 **Object Localization**: Locate specific objects within frames
 - 🖼️ **Image Similarity**: Find visually similar frames
 - 🎨 **Hybrid Search**: Combine text and image queries for better results
+- 👤 **Face Detection**: Detect and extract faces from video frames
+- 🔎 **Face Search**: Find specific people across videos
+- 📊 **Face Analytics**: Age, gender, and demographic analysis
+- ⏱️ **Person Tracking**: Track individuals across video timeline
 - ⚡ **Fast & Scalable**: Built on LanceDB for efficient vector search
 
 ## Architecture
 
 ```
-┌─────────────┬──────────┬─────────────┬──────────────┐
-│   Model     │  Text    │   Visual    │  Best For    │
-│             │  Search  │  Precision  │              │
-├─────────────┼──────────┼─────────────┼──────────────┤
-│ CLIP        │   ✓✓✓    │      ✓      │ Semantic     │
-│             │          │             │ search       │
-├─────────────┼──────────┼─────────────┼──────────────┤
-│ DINOv3      │   ✗      │     ✓✓✓     │ Visual       │
-│             │          │             │ similarity   │
-├─────────────┼──────────┼─────────────┼──────────────┤
-│ CLIP+DINOv3 │   ✓✓✓    │     ✓✓✓     │ Best hybrid  │
-└─────────────┴──────────┴─────────────┴──────────────┘
+┌──────────────┬──────────┬─────────────┬──────────────┬─────────────┐
+│   Model      │  Text    │   Visual    │  Faces       │  Best For   │
+│              │  Search  │  Precision  │              │             │
+├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
+│ CLIP         │   ✓✓✓    │      ✓      │      ✗       │ Semantic    │
+│              │          │             │              │ search      │
+├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
+│ DINOv3       │   ✗      │     ✓✓✓     │      ✗       │ Visual      │
+│              │          │             │              │ similarity  │
+├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
+│ InsightFace  │   ✗      │      ✗      │     ✓✓✓      │ Face        │
+│              │          │             │              │ recognition │
+├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
+│ All Combined │   ✓✓✓    │     ✓✓✓     │     ✓✓✓      │ Complete    │
+└──────────────┴──────────┴─────────────┴──────────────┴─────────────┘
 ```
 
 ## Installation
@@ -94,6 +102,44 @@ detections = search.locate_object(
 
 # Visualize detections
 search.visualize_detections("frame.jpg", detections, output_path="output.jpg")
+```
+
+### 6. Face Detection and Search
+
+```python
+# Enable face detection
+search = HybridVideoSearch(
+    db_path="video_search.db",
+    use_face_detection=True  # Enable face recognition
+)
+
+# Index faces from video
+num_faces = search.index_video_faces(
+    video_path="video.mp4",
+    video_id="video_001",
+    fps=2,
+    min_confidence=0.5
+)
+
+# Search for similar faces
+results = search.search_faces(
+    query_face="person_photo.jpg",
+    similarity_threshold=0.6,
+    limit=10
+)
+
+# Track a person across video
+appearances = search.find_person_across_video(
+    reference_face="person_photo.jpg",
+    video_id="video_001",
+    similarity_threshold=0.6
+)
+
+# Get face statistics
+stats = search.get_face_statistics()
+print(f"Total faces: {stats['total_faces']}")
+print(f"Gender distribution: {stats['gender_distribution']}")
+print(f"Average age: {stats['age_mean']:.1f}")
 ```
 
 ## Usage Examples
