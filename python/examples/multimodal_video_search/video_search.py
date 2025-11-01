@@ -366,7 +366,7 @@ class HybridVideoSearch:
                  device: str = "cuda",
                  use_dino: bool = True,
                  use_face_detection: bool = False,
-                 face_model: str = "buffalo_l",
+                 face_model: str = "Facenet512",
                  batch_size: int = 32):
         """
         Initialize hybrid video search system
@@ -379,7 +379,7 @@ class HybridVideoSearch:
             device: Device to run models on
             use_dino: Whether to use DINOv3 (disable for faster indexing)
             use_face_detection: Whether to enable face detection
-            face_model: InsightFace model name (buffalo_l, buffalo_s, antelopev2)
+            face_model: DeepFace model name (VGG-Face, Facenet, Facenet512, ArcFace, etc.)
             batch_size: Batch size for embedding extraction
         """
         self.db_path = db_path
@@ -410,11 +410,12 @@ class HybridVideoSearch:
             if not FACE_DETECTION_AVAILABLE:
                 warnings.warn(
                     "Face detection requested but dependencies not available. "
-                    "Install with: pip install insightface onnxruntime-gpu"
+                    "Install with: pip install deepface tf-keras"
                 )
             else:
                 self.face_embeddings = FaceEmbeddings(
                     model_name=face_model,
+                    detector_backend="retinaface",
                     device=self.device
                 )
                 print("✓ Face detection enabled")

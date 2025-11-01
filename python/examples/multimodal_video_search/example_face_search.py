@@ -25,7 +25,7 @@ def main():
         db_path="./face_search_demo.db",
         device="cuda",  # Use "cpu" if no GPU
         use_face_detection=True,  # Enable face detection
-        face_model="buffalo_l"  # High accuracy model
+        face_model="Facenet512"  # Good accuracy and speed (default)
     )
 
     # Example 1: Index faces from a video

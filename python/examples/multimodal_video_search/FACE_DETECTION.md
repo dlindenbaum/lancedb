@@ -16,27 +16,45 @@ This guide covers face detection, recognition, and tracking features in the hybr
 
 ## Overview
 
-The face detection module uses **InsightFace** for:
-- High-accuracy face detection
-- 512-dimensional face embeddings
-- Face attribute detection (age, gender)
+The face detection module uses **DeepFace** for:
+- High-accuracy face detection with multiple backends
+- Face embeddings (128-4096 dim depending on model)
+- Face attribute detection (age, gender, race, emotion)
 - Multi-face detection per frame
 - Real-time performance on GPU
 
 ### Model Options
 
-- **buffalo_l** (default): High accuracy, slower (recommended)
-- **buffalo_s**: Balanced accuracy and speed
-- **antelopev2**: Latest model, best accuracy
+DeepFace supports multiple recognition models:
+- **Facenet512** (default): 512-dim embeddings, good accuracy
+- **ArcFace**: State-of-the-art accuracy
+- **VGG-Face**: Classic model, 2622-dim embeddings
+- **Facenet**: 128-dim embeddings, fast
+- **OpenFace**: Lightweight, 128-dim
+- **DeepID**: Fast inference
+- **Dlib**: Good for CPU
+
+### Detector Backends
+
+- **retinaface** (default): Best accuracy
+- **mtcnn**: Good balance
+- **opencv**: Fastest, lower accuracy
+- **ssd**: Fast and accurate
+- **dlib**: CPU-friendly
+- **mediapipe**: Mobile-optimized
+- **yolov8**: Latest YOLO
 
 ## Installation
 
 ```bash
 # Install face detection dependencies
-pip install insightface onnxruntime-gpu
+pip install deepface tf-keras
+
+# For GPU (recommended for faster processing)
+pip install tensorflow[and-cuda]
 
 # For CPU-only systems
-pip install insightface onnxruntime
+pip install tensorflow
 ```
 
 ## Quick Start
@@ -50,7 +68,7 @@ from video_search import HybridVideoSearch
 search = HybridVideoSearch(
     db_path="video_search.db",
     use_face_detection=True,
-    face_model="buffalo_l",  # High accuracy model
+    face_model="Facenet512",  # Good accuracy and speed (default)
     device="cuda"
 )
 ```
@@ -503,11 +521,18 @@ print(f"Total faces indexed: {sum(results)}")
 ### Optimize Detection Speed
 
 ```python
-# Use smaller model for faster processing
+# Use smaller/faster model for faster processing
 search = HybridVideoSearch(
     use_face_detection=True,
-    face_model="buffalo_s",  # Faster than buffalo_l
+    face_model="Facenet",  # Faster than Facenet512 (128-dim vs 512-dim)
     device="cuda"
+)
+
+# Or use OpenFace for lightweight processing
+search = HybridVideoSearch(
+    use_face_detection=True,
+    face_model="OpenFace",  # Lightweight, good for CPU
+    device="cpu"
 )
 
 # Reduce FPS for faster indexing
@@ -548,9 +573,13 @@ results = search.search_faces(
 search = HybridVideoSearch(device="cuda", use_face_detection=True)
 ```
 
-**Solution 2: Use smaller model**
+**Solution 2: Use smaller/faster model**
 ```python
-search = HybridVideoSearch(face_model="buffalo_s", use_face_detection=True)
+# Use Facenet (128-dim, faster) instead of Facenet512 (512-dim)
+search = HybridVideoSearch(face_model="Facenet", use_face_detection=True)
+
+# Or use OpenFace for lightweight processing
+search = HybridVideoSearch(face_model="OpenFace", use_face_detection=True)
 ```
 
 **Solution 3: Reduce frame rate**
@@ -567,9 +596,11 @@ search.index_video_faces(video_path, video_id, fps=0.5)
    - Action videos: 2-3 fps
    - High-quality analysis: 5+ fps
 4. **Model Selection**:
-   - buffalo_l: Best accuracy (default)
-   - buffalo_s: Balanced speed/accuracy
-   - antelopev2: Latest, best quality
+   - Facenet512: Good accuracy, 512-dim (default)
+   - ArcFace: Best accuracy
+   - Facenet: Fast, 128-dim
+   - OpenFace: Lightweight, good for CPU
+   - VGG-Face: Classic, very high dimensional
 5. **Database Management**: Regularly save face databases to avoid recomputation
 
 ## Next Steps

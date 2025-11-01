@@ -21,6 +21,7 @@ tqdm>=4.65.0
 matplotlib>=3.7.0
 
 # Face detection and recognition (optional)
-insightface>=0.7.3
-onnxruntime-gpu>=1.16.0  # Use onnxruntime for CPU-only
-# Alternative: pip install onnxruntime for CPU-only systems
+deepface>=0.0.79
+tf-keras>=2.15.0  # Required by deepface
+# For GPU: tensorflow[and-cuda]
+# For CPU only: pip install tensorflow

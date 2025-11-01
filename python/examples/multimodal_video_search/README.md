@@ -3,7 +3,7 @@
 A comprehensive multimodal video search system that combines:
 - **CLIP**: Semantic text-to-image search ("American flag in background", "person wearing red")
 - **DINOv3**: Fine-grained visual features for precise object localization
-- **Face Recognition**: Detect, recognize, and track faces using InsightFace
+- **Face Recognition**: Detect, recognize, and track faces using DeepFace
 - **LanceDB**: High-performance vector storage and retrieval
 
 ## Features
@@ -31,7 +31,7 @@ A comprehensive multimodal video search system that combines:
 │ DINOv3       │   ✗      │     ✓✓✓     │      ✗       │ Visual      │
 │              │          │             │              │ similarity  │
 ├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
-│ InsightFace  │   ✗      │      ✗      │     ✓✓✓      │ Face        │
+│ DeepFace     │   ✗      │      ✗      │     ✓✓✓      │ Face        │
 │              │          │             │              │ recognition │
 ├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
 │ All Combined │   ✓✓✓    │     ✓✓✓     │     ✓✓✓      │ Complete    │
