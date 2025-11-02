@@ -1,0 +1,880 @@
+# LanceDB Python SDK
+
+> LanceDB is a multimodal AI lakehouse designed for fast, scalable, and production-ready vector search.
+> Built on the Lance columnar format for efficient storage and analytics.
+
+## Overview
+
+LanceDB is a vector database that supports:
+- Vector similarity search (ANN)
+- Full-text search (FTS)
+- Hybrid search (combining vector + FTS)
+- SQL-like filtering and queries
+- Multimodal data (text, images, videos, point clouds, etc.)
+
+Available as both a local (embedded) database and a cloud service (LanceDB Cloud).
+
+## Installation
+
+```bash
+pip install lancedb
+```
+
+## Quick Start
+
+```python
+import lancedb
+
+# Connect to database (local or cloud)
+db = lancedb.connect("./my-database")  # Local
+# db = lancedb.connect("db://my-db", api_key="...")  # Cloud
+
+# Create a table
+data = [
+    {"vector": [0.1, 0.2], "text": "hello", "id": 1},
+    {"vector": [0.3, 0.4], "text": "world", "id": 2},
+]
+table = db.create_table("my_table", data)
+
+# Vector search
+results = table.search([0.1, 0.2]).limit(10).to_pandas()
+
+# Full-text search
+results = table.search("hello world", query_type="fts").limit(10).to_list()
+
+# Hybrid search (vector + FTS)
+results = table.search([0.1, 0.2], query_type="hybrid").limit(10).to_arrow()
+```
+
+## Core Concepts
+
+### Connections
+
+```python
+# Local database (embedded, like SQLite)
+db = lancedb.connect("./my-database")
+
+# Cloud database (LanceDB Cloud)
+db = lancedb.connect("db://my-db", api_key="ldb_...")
+
+# Async connection
+db = await lancedb.connect_async("./my-database")
+```
+
+### Tables
+
+```python
+# Create table
+table = db.create_table("my_table", data)
+
+# Open existing table
+table = db.open_table("my_table")
+
+# List tables
+db.table_names()
+
+# Drop table
+db.drop_table("my_table")
+```
+
+### Data Operations
+
+```python
+# Add data
+table.add(data)  # Append by default
+table.add(data, mode="overwrite")  # Overwrite
+
+# Update data
+table.update(where="id = 1", values={"text": "updated"})
+
+# Delete data
+table.delete("id = 1")
+
+# Merge insert (upsert)
+table.merge_insert("id") \
+    .when_matched_update_all() \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+```
+
+### Search Types
+
+#### Vector Search
+```python
+# Basic vector search
+results = table.search([0.1, 0.2, 0.3]) \
+    .limit(10) \
+    .to_pandas()
+
+# With filtering
+results = table.search([0.1, 0.2, 0.3]) \
+    .where("category = 'electronics'") \
+    .limit(10) \
+    .to_list()
+
+# Configure search parameters
+results = table.search([0.1, 0.2, 0.3]) \
+    .metric("cosine") \
+    .nprobes(20) \
+    .refine_factor(10) \
+    .limit(10) \
+    .to_arrow()
+```
+
+#### Full-Text Search
+```python
+# Basic FTS
+results = table.search("machine learning", query_type="fts") \
+    .limit(10) \
+    .to_list()
+
+# Complex FTS queries
+from lancedb.fts import MatchQuery, PhraseQuery, BooleanQuery
+
+query = BooleanQuery(
+    must=[MatchQuery("machine learning")],
+    should=[PhraseQuery("neural networks")],
+    must_not=[MatchQuery("deprecated")]
+)
+results = table.search(query).limit(10).to_list()
+```
+
+#### Hybrid Search
+```python
+# Combines vector and FTS with automatic reranking
+results = table.search([0.1, 0.2, 0.3], query_type="hybrid") \
+    .text("machine learning") \
+    .limit(10) \
+    .to_list()
+```
+
+### Indexing
+
+```python
+from lancedb.index import IvfPq, BTree, FTS
+
+# Vector index for fast search
+table.create_index(
+    index=IvfPq(num_partitions=256, num_sub_vectors=16)
+)
+
+# Scalar index for filtering
+table.create_index(column="category", index=BTree())
+
+# Full-text search index
+table.create_index(column="text", index=FTS())
+
+# List indices
+table.list_indices()
+
+# Drop index
+table.drop_index("vector_idx")
+```
+
+### Schema
+
+```python
+import pyarrow as pa
+from lancedb import vector
+
+# Define schema with vector column
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", vector(384)),  # 384-dimensional vector
+    pa.field("text", pa.string()),
+])
+
+table = db.create_table("my_table", schema=schema)
+```
+
+### Embeddings and Auto-Embedding Mode
+
+LanceDB supports automatic embedding generation for both data ingestion and queries.
+
+#### Basic Embedding Setup
+
+```python
+from lancedb.embeddings import get_registry
+
+# Get embedding function from registry
+registry = get_registry()
+model = registry.get("sentence-transformers").create(name="all-MiniLM-L6-v2")
+
+# Create table with auto-embedding
+table = db.create_table(
+    "my_table",
+    data=[{"text": "hello"}, {"text": "world"}],
+    embedding_functions=[model.for_column("text", "vector")]
+)
+
+# Search automatically embeds query
+results = table.search("hello world").limit(10).to_list()
+```
+
+#### Using Pydantic Schema with Source and Vector Fields
+
+The recommended approach is to use Pydantic models with `SourceField` and `VectorField`:
+
+```python
+from lancedb.pydantic import LanceModel, Vector
+from lancedb.embeddings import get_registry
+
+# Define embedding function
+registry = get_registry()
+embeddings = registry.get("openai").create(name="text-embedding-ada-002")
+
+# Define schema with source and vector fields
+class Documents(LanceModel):
+    text: str = embeddings.SourceField()  # Source data to embed
+    vector: Vector(embeddings.ndims()) = embeddings.VectorField()  # Embedding destination
+    metadata: dict  # Additional fields
+
+# Create table with schema
+table = db.create_table("documents", schema=Documents)
+
+# Add data - embeddings generated automatically on insert
+table.add([
+    {"text": "LanceDB is a vector database", "metadata": {"category": "tech"}},
+    {"text": "Python is a programming language", "metadata": {"category": "programming"}}
+])
+
+# Query - embedding generated automatically for search
+results = table.search("database for vectors").limit(5).to_pandas()
+```
+
+**Key Points:**
+- `SourceField()`: Marks the column containing source data that will be embedded
+- `VectorField()`: Marks the column where embeddings will be stored
+- Embeddings are generated automatically during both `add()` and `search()` operations
+- You can have multiple source/vector pairs for different embedding models
+
+#### Multi-Modal Embeddings
+
+For multi-modal data (e.g., images), source and vector columns can be different types:
+
+```python
+from lancedb.embeddings import get_registry
+from lancedb.pydantic import LanceModel, Vector
+
+# CLIP for image-text embeddings
+clip = get_registry().get("open-clip").create()
+
+class Images(LanceModel):
+    image_uri: str = clip.SourceField()  # Image path
+    vector: Vector(clip.ndims()) = clip.VectorField()  # Image embedding
+    caption: str
+
+table = db.create_table("images", schema=Images)
+table.add([{"image_uri": "path/to/image.jpg", "caption": "A cat"}])
+
+# Search with text - CLIP embeds text and searches image embeddings
+results = table.search("cat playing").limit(10).to_pandas()
+
+# Search with image
+from PIL import Image
+query_image = Image.open("query.jpg")
+results = table.search(query_image).limit(10).to_pandas()
+```
+
+#### Manual Embedding (Without Auto-Embedding)
+
+If you prefer to generate embeddings manually:
+
+```python
+import numpy as np
+
+# Define schema without embedding functions
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", pa.list_(pa.float32(), 384)),  # Or use vector(384)
+    pa.field("text", pa.string())
+])
+
+table = db.create_table("manual_embeddings", schema=schema)
+
+# Generate embeddings yourself
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+texts = ["hello world", "goodbye world"]
+embeddings = model.encode(texts)
+
+# Add data with pre-computed embeddings
+data = [
+    {"id": i, "vector": emb.tolist(), "text": text}
+    for i, (emb, text) in enumerate(zip(embeddings, texts))
+]
+table.add(data)
+
+# Search with pre-computed query embedding
+query_emb = model.encode(["greetings"])[0]
+results = table.search(query_emb).limit(10).to_pandas()
+```
+
+#### Rate Limiting and Retries
+
+Embedding functions support automatic retries for rate-limited APIs:
+
+```python
+# Default: 7 retries with exponential backoff
+model = registry.get("openai").create(name="text-embedding-ada-002")
+
+# Custom retry configuration
+model = registry.get("openai").create(name="text-embedding-ada-002", max_retries=10)
+
+# Disable retries
+model = registry.get("openai").create(name="text-embedding-ada-002", max_retries=0)
+```
+
+#### Secure API Key Management
+
+Use variable references instead of hardcoded API keys:
+
+```python
+# Set variable in registry (per-session, not persisted)
+registry = get_registry()
+registry.set_var("openai_api_key", "sk-...")
+
+# Reference variable in config
+model = registry.get("openai").create(
+    name="text-embedding-ada-002",
+    api_key="$var:openai_api_key"
+)
+
+# With default value if variable not set
+model = registry.get("openai").create(
+    name="text-embedding-ada-002",
+    api_key="$var:openai_api_key:default_key_here"
+)
+```
+
+#### Available Embedding Providers
+
+- **openai** - OpenAI embeddings (text-embedding-ada-002, text-embedding-3-small, etc.)
+- **cohere** - Cohere embeddings
+- **sentence-transformers** - Sentence Transformers models
+- **huggingface** - HuggingFace Transformers
+- **open-clip** - OpenCLIP multi-modal (text + image)
+- **gemini** - Google Gemini embeddings
+- **bedrock** - AWS Bedrock embeddings
+- **ollama** - Ollama embeddings
+- **jina** - JinaAI embeddings
+- **voyageai** - VoyageAI embeddings
+- **instructor** - Instructor embeddings
+- **imagebind** - ImageBind multi-modal
+- **colpali** - ColPali vision embeddings
+- And more...
+
+## Data Formats
+
+LanceDB accepts multiple input formats:
+- List of dicts: `[{"col": value}, ...]`
+- Pandas DataFrame: `pd.DataFrame(...)`
+- PyArrow Table: `pa.Table`
+- Polars DataFrame: `pl.DataFrame`
+- Pydantic models
+- HuggingFace Datasets
+
+Output formats:
+- `.to_list()` - List of dicts
+- `.to_pandas()` - Pandas DataFrame
+- `.to_arrow()` - PyArrow Table
+- `.to_polars()` - Polars DataFrame
+
+## Filtering with SQL WHERE Clauses
+
+LanceDB supports SQL-style WHERE clauses powered by Apache DataFusion for filtering query results.
+
+### Basic Filter Syntax
+
+```python
+# Simple comparison
+results = table.search([0.1, 0.2]).where("price < 100").limit(10).to_pandas()
+
+# Multiple conditions with AND/OR
+results = table.search([0.1, 0.2]) \
+    .where("price < 100 AND category = 'books'") \
+    .limit(10).to_pandas()
+
+# Complex conditions
+results = table.search([0.1, 0.2]) \
+    .where("(price < 100 OR discount > 0.5) AND category = 'electronics'") \
+    .limit(10).to_pandas()
+```
+
+### Comparison Operators
+
+```python
+# Numeric comparisons
+.where("price > 50")
+.where("price >= 50")
+.where("price < 100")
+.where("price <= 100")
+.where("price = 99.99")
+.where("price != 99.99")
+
+# String comparisons
+.where("category = 'electronics'")
+.where("category != 'books'")
+
+# IN operator
+.where("category IN ('books', 'electronics', 'toys')")
+.where("id IN (1, 2, 3, 4, 5)")
+```
+
+### Logical Operators
+
+```python
+# AND - all conditions must be true
+.where("price < 100 AND category = 'books' AND in_stock = true")
+
+# OR - any condition must be true
+.where("category = 'books' OR category = 'electronics'")
+
+# NOT - negation
+.where("NOT (category = 'books')")
+
+# Complex combinations
+.where("(category = 'books' OR category = 'dvds') AND price < 50")
+```
+
+### NULL Checks
+
+```python
+# Check for NULL values
+.where("description IS NULL")
+.where("description IS NOT NULL")
+
+# Boolean checks
+.where("in_stock IS TRUE")
+.where("in_stock IS NOT TRUE")
+.where("in_stock IS FALSE")
+.where("in_stock IS NOT FALSE")
+```
+
+### String Pattern Matching
+
+```python
+# LIKE operator (% is wildcard)
+.where("title LIKE '%python%'")  # Contains "python"
+.where("title LIKE 'Python%'")   # Starts with "Python"
+.where("title LIKE '%Guide'")    # Ends with "Guide"
+
+# NOT LIKE
+.where("title NOT LIKE '%deprecated%'")
+
+# Regular expressions
+.where("regexp_match(title, '^[A-Z].*Guide$')")
+```
+
+### Type Casting
+
+```python
+# Cast between types
+.where("CAST(price AS INTEGER) = 100")
+.where("CAST(created_at AS DATE) = date '2024-01-01'")
+```
+
+### Date and Timestamp Literals
+
+```python
+# Date literals
+.where("created_date = date '2024-01-01'")
+.where("created_date > date '2024-01-01'")
+
+# Timestamp literals
+.where("created_at = timestamp '2024-01-01 12:00:00'")
+.where("created_at >= timestamp '2024-01-01 00:00:00'")
+
+# Timestamp with precision
+.where("event_time = timestamp(3) '2024-01-01 12:00:00.123'")  # Milliseconds
+.where("event_time = timestamp(6) '2024-01-01 12:00:00.123456'")  # Microseconds (default)
+.where("event_time = timestamp(9) '2024-01-01 12:00:00.123456789'")  # Nanoseconds
+
+# Decimal literals
+.where("price = decimal(8,3) '123.456'")
+```
+
+### Field Name Escaping
+
+For field names with special characters, uppercase, or SQL keywords, use backticks:
+
+```python
+# Uppercase field names
+.where("`ProductID` = 12345")
+
+# Field names with spaces
+.where("`product name` = 'Widget'")
+
+# SQL keywords as field names
+.where("`ORDER` = 'pending' AND `SELECT` = true")
+
+# Nested fields with spaces
+.where("`user info`.`first name` = 'John'")
+```
+
+### Pre-filtering vs Post-filtering
+
+**Pre-filtering** applies the filter before vector search (faster, may miss results):
+```python
+# Filter first, then search the filtered set
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'", prefilter=True) \
+    .limit(10).to_pandas()
+```
+
+**Post-filtering** applies the filter after vector search (default, more accurate):
+```python
+# Search first, then filter the top results
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'", prefilter=False) \
+    .limit(10).to_pandas()
+
+# Same as above (prefilter=False is default)
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'") \
+    .limit(10).to_pandas()
+```
+
+**When to use prefilter:**
+- When you have a scalar index on the filter column
+- When the filter will eliminate a large portion of data
+- When you want faster queries and can accept potentially missing some results
+
+**When to use postfilter:**
+- When you want the most accurate top-k results
+- When the filter is selective (keeps most results)
+- Default choice for most use cases
+
+### Filtering Without Vector Search
+
+```python
+# Plain SQL filtering (no vector search)
+results = table.search() \
+    .where("price < 100 AND category = 'books'") \
+    .limit(100).to_pandas()
+```
+
+### SQL Functions
+
+LanceDB supports many SQL functions from Apache DataFusion:
+
+```python
+# String functions
+.where("UPPER(category) = 'BOOKS'")
+.where("LOWER(title) LIKE '%python%'")
+.where("LENGTH(description) > 100")
+
+# Math functions
+.where("ABS(price - 50) < 10")
+.where("ROUND(price) = 100")
+
+# Date functions
+.where("EXTRACT(YEAR FROM created_at) = 2024")
+.where("DATE_TRUNC('day', created_at) = date '2024-01-01'")
+```
+
+Full list of functions: https://arrow.apache.org/datafusion/user-guide/sql/scalar_functions.html
+
+## Query Building and Chaining
+
+LanceDB provides a fluent query API with method chaining.
+
+### Complete Query Building Example
+
+```python
+# Full example with all options
+results = (
+    table.search([0.1, 0.2, 0.3])  # Vector query
+    .metric("cosine")               # Distance metric
+    .where("price < 100", prefilter=True)  # Pre-filter
+    .select(["id", "title", "price"])      # Column selection
+    .limit(20)                      # Number of results
+    .nprobes(40)                    # IVF partitions to search
+    .refine_factor(10)              # Refine with more candidates
+    .with_row_id(True)              # Include row IDs
+    .to_pandas()                    # Return as DataFrame
+)
+```
+
+### Query Methods Reference
+
+#### `.metric(distance_type)` - Set Distance Metric
+```python
+# Supported metrics
+.metric("l2")       # Euclidean distance (default)
+.metric("cosine")   # Cosine similarity (for normalized vectors)
+.metric("dot")      # Dot product (for maximum inner product search)
+.metric("hamming")  # Hamming distance (for binary vectors)
+```
+
+**Choosing a metric:**
+- **l2**: Default, works for most cases
+- **cosine**: Best for text embeddings and normalized vectors
+- **dot**: For maximum inner product search (e.g., recommendation systems)
+- **hamming**: For binary vectors only
+
+#### `.limit(n)` - Limit Results
+```python
+.limit(10)   # Return top 10 results
+.limit(100)  # Return top 100 results
+```
+
+#### `.offset(n)` - Skip Results (Pagination)
+```python
+# Page 1 (results 0-9)
+.limit(10).offset(0)
+
+# Page 2 (results 10-19)
+.limit(10).offset(10)
+
+# Page 3 (results 20-29)
+.limit(10).offset(20)
+```
+
+#### `.select(columns)` - Column Projection
+```python
+# Select specific columns (list)
+.select(["id", "title", "price"])
+
+# Select all columns
+.select(["*"])
+
+# Select with SQL expressions (dict)
+.select({
+    "id": "id",
+    "upper_title": "UPPER(title)",
+    "discounted_price": "price * 0.9"
+})
+```
+
+#### `.where(predicate, prefilter=False)` - Filter Results
+See "Filtering with SQL WHERE Clauses" section above for details.
+
+#### `.nprobes(n)` - IVF Index Tuning
+```python
+# Number of IVF partitions to search (higher = better recall, slower)
+.nprobes(20)   # Fast, lower recall
+.nprobes(50)   # Balanced
+.nprobes(100)  # Slow, higher recall
+
+# Fine-grained control
+.minimum_nprobes(10)
+.maximum_nprobes(50)
+```
+
+**Only applies to IVF-based indices** (IvfFlat, IvfPq, IvfRq). Default is typically 20.
+
+#### `.refine_factor(factor)` - Refine Results
+```python
+# Refine by over-sampling and re-ranking
+.refine_factor(1)    # No refinement (default)
+.refine_factor(10)   # Fetch 10x candidates, re-rank, return top k
+.refine_factor(50)   # Fetch 50x candidates (higher accuracy, slower)
+```
+
+**How it works:** Fetches `limit * refine_factor` candidates, re-ranks with exact distances, returns top `limit`.
+
+#### `.ef(n)` - HNSW Index Tuning
+```python
+# Size of dynamic candidate list for HNSW search
+.ef(100)   # Fast, lower recall
+.ef(200)   # Balanced (default is 1.5 * limit)
+.ef(400)   # Slow, higher recall
+```
+
+**Only applies to HNSW-based indices** (HnswPq, HnswSq).
+
+#### `.distance_range(lower_bound, upper_bound)` - Filter by Distance
+```python
+# Only return results with distance in range
+.distance_range(0.0, 0.5)     # Distance between 0.0 and 0.5
+.distance_range(lower_bound=0.1)      # Distance >= 0.1
+.distance_range(upper_bound=0.8)      # Distance <= 0.8
+```
+
+Useful for removing very similar or very dissimilar results.
+
+#### `.bypass_vector_index()` - Exhaustive Search
+```python
+# Skip vector index, do exhaustive (flat) search
+.bypass_vector_index()
+```
+
+Use when:
+- You want exact results (no approximation)
+- Dataset is small (<100k vectors)
+- Testing or debugging
+
+#### `.with_row_id(include=True)` - Include Row IDs
+```python
+# Include internal row IDs in results
+.with_row_id(True)
+```
+
+Row IDs are useful for updates, deletes, or tracking specific rows.
+
+### Output Format Methods
+
+#### `.to_pandas()` - Return as Pandas DataFrame
+```python
+df = table.search([0.1, 0.2]).limit(10).to_pandas()
+# Returns: pandas.DataFrame
+```
+
+#### `.to_arrow()` - Return as PyArrow Table
+```python
+arrow_table = table.search([0.1, 0.2]).limit(10).to_arrow()
+# Returns: pyarrow.Table
+```
+
+#### `.to_list()` - Return as List of Dicts
+```python
+results = table.search([0.1, 0.2]).limit(10).to_list()
+# Returns: [{"id": 1, "vector": [...], ...}, ...]
+```
+
+#### `.to_polars()` - Return as Polars DataFrame
+```python
+df = table.search([0.1, 0.2]).limit(10).to_polars()
+# Returns: polars.DataFrame
+```
+
+#### `.to_pydantic(model)` - Return as Pydantic Models
+```python
+from lancedb.pydantic import LanceModel
+
+class Result(LanceModel):
+    id: int
+    title: str
+    vector: list[float]
+
+results = table.search([0.1, 0.2]).limit(10).to_pydantic(Result)
+# Returns: list[Result]
+```
+
+#### `.to_batches(batch_size)` - Stream Results
+```python
+# Get result batches (useful for large result sets)
+reader = table.search([0.1, 0.2]).to_batches(batch_size=1000)
+for batch in reader:
+    # Process batch (pyarrow.RecordBatch)
+    process(batch)
+```
+
+## Async API
+
+```python
+import lancedb
+
+# Async connection
+db = await lancedb.connect_async("./my-database")
+
+# Async operations
+table = await db.open_table("my_table")
+await table.add(data)
+results = await table.search([0.1, 0.2]).limit(10).to_list()
+```
+
+## Cloud Features
+
+```python
+# Connect to LanceDB Cloud
+db = lancedb.connect(
+    "db://my-db",
+    api_key="ldb_...",
+    region="us-east-1"
+)
+
+# Configure client
+from lancedb.remote import ClientConfig, TimeoutConfig, RetryConfig
+
+config = ClientConfig(
+    timeout_config=TimeoutConfig(connect_timeout=10.0, read_timeout=60.0),
+    retry_config=RetryConfig(retries=3, backoff_factor=2.0)
+)
+db = lancedb.connect("db://my-db", api_key="ldb_...", client_config=config)
+```
+
+## Vector Index Types
+
+- `IvfFlat` - Inverted file with exact search
+- `IvfPq` - IVF with Product Quantization (fast, less memory)
+- `HnswPq` - HNSW with PQ (faster queries, more memory)
+- `HnswSq` - HNSW with Scalar Quantization
+
+## Full-Text Search Query Types
+
+- `MatchQuery` - Simple text matching
+- `PhraseQuery` - Exact phrase matching
+- `BooleanQuery` - Complex boolean logic (AND/OR/NOT)
+- `BoostQuery` - Weighted queries
+- `MultiMatchQuery` - Search across multiple columns
+
+## Rerankers
+
+```python
+from lancedb.rerankers import RRFReranker, CohereReranker
+
+# Reciprocal Rank Fusion (default for hybrid)
+reranker = RRFReranker()
+
+# Cohere reranker
+reranker = CohereReranker(api_key="...")
+
+# Use in hybrid search
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10)
+```
+
+## Embedding Providers
+
+Built-in support for 20+ embedding providers:
+- OpenAI
+- Cohere
+- HuggingFace Transformers
+- Sentence Transformers
+- Google Gemini
+- AWS Bedrock
+- Ollama
+- JinaAI
+- VoyageAI
+- And more...
+
+## Integration with AI Frameworks
+
+LanceDB integrates with:
+- LangChain - Vector store for LLM applications
+- LlamaIndex - Vector index for retrieval
+- Apache Arrow - Zero-copy data interchange
+- Pandas/Polars - DataFrame operations
+- DuckDB - SQL analytics
+
+## Best Practices
+
+1. **Indexing**: Create indices for large datasets (>100k vectors)
+2. **Batch Operations**: Use batch inserts for better performance
+3. **Schema Design**: Define schema upfront for production use
+4. **Filtering**: Apply filters early in query pipeline
+5. **Distance Metrics**: Choose appropriate metric (cosine for normalized, l2 for raw)
+6. **Hybrid Search**: Use hybrid search when you have both semantic and keyword requirements
+
+## Common Use Cases
+
+- Semantic search over documents
+- Image similarity search
+- Recommendation systems
+- RAG (Retrieval Augmented Generation) for LLMs
+- Anomaly detection
+- Question answering systems
+- Multi-modal search
+
+## Resources
+
+- Documentation: https://lancedb.github.io/lancedb/
+- Python SDK Docs: https://lancedb.github.io/lancedb/python/python/
+- GitHub: https://github.com/lancedb/lancedb
+- Discord: https://discord.gg/zMM32dvNtd
+- Examples: https://github.com/lancedb/vectordb-recipes

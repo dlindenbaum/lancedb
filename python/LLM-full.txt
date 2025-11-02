@@ -1,0 +1,1973 @@
+# LanceDB Python SDK
+
+> LanceDB is a multimodal AI lakehouse designed for fast, scalable, and production-ready vector search.
+> Built on the Lance columnar format for efficient storage and analytics.
+
+## Overview
+
+LanceDB is a vector database that supports:
+- Vector similarity search (ANN)
+- Full-text search (FTS)
+- Hybrid search (combining vector + FTS)
+- SQL-like filtering and queries
+- Multimodal data (text, images, videos, point clouds, etc.)
+
+Available as both a local (embedded) database and a cloud service (LanceDB Cloud).
+
+## Installation
+
+```bash
+pip install lancedb
+```
+
+## Quick Start
+
+```python
+import lancedb
+
+# Connect to database (local or cloud)
+db = lancedb.connect("./my-database")  # Local
+# db = lancedb.connect("db://my-db", api_key="...")  # Cloud
+
+# Create a table
+data = [
+    {"vector": [0.1, 0.2], "text": "hello", "id": 1},
+    {"vector": [0.3, 0.4], "text": "world", "id": 2},
+]
+table = db.create_table("my_table", data)
+
+# Vector search
+results = table.search([0.1, 0.2]).limit(10).to_pandas()
+
+# Full-text search
+results = table.search("hello world", query_type="fts").limit(10).to_list()
+
+# Hybrid search (vector + FTS)
+results = table.search([0.1, 0.2], query_type="hybrid").limit(10).to_arrow()
+```
+
+## Core Concepts
+
+### Connections
+
+```python
+# Local database (embedded, like SQLite)
+db = lancedb.connect("./my-database")
+
+# Cloud database (LanceDB Cloud)
+db = lancedb.connect("db://my-db", api_key="ldb_...")
+
+# Async connection
+db = await lancedb.connect_async("./my-database")
+```
+
+### Tables
+
+```python
+# Create table
+table = db.create_table("my_table", data)
+
+# Open existing table
+table = db.open_table("my_table")
+
+# List tables
+db.table_names()
+
+# Drop table
+db.drop_table("my_table")
+```
+
+### Data Operations
+
+```python
+# Add data
+table.add(data)  # Append by default
+table.add(data, mode="overwrite")  # Overwrite
+
+# Update data
+table.update(where="id = 1", values={"text": "updated"})
+
+# Delete data
+table.delete("id = 1")
+
+# Merge insert (upsert)
+table.merge_insert("id") \
+    .when_matched_update_all() \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+```
+
+### Search Types
+
+#### Vector Search
+```python
+# Basic vector search
+results = table.search([0.1, 0.2, 0.3]) \
+    .limit(10) \
+    .to_pandas()
+
+# With filtering
+results = table.search([0.1, 0.2, 0.3]) \
+    .where("category = 'electronics'") \
+    .limit(10) \
+    .to_list()
+
+# Configure search parameters
+results = table.search([0.1, 0.2, 0.3]) \
+    .metric("cosine") \
+    .nprobes(20) \
+    .refine_factor(10) \
+    .limit(10) \
+    .to_arrow()
+```
+
+#### Full-Text Search
+```python
+# Basic FTS
+results = table.search("machine learning", query_type="fts") \
+    .limit(10) \
+    .to_list()
+
+# Complex FTS queries
+from lancedb.fts import MatchQuery, PhraseQuery, BooleanQuery
+
+query = BooleanQuery(
+    must=[MatchQuery("machine learning")],
+    should=[PhraseQuery("neural networks")],
+    must_not=[MatchQuery("deprecated")]
+)
+results = table.search(query).limit(10).to_list()
+```
+
+#### Hybrid Search
+```python
+# Combines vector and FTS with automatic reranking
+results = table.search([0.1, 0.2, 0.3], query_type="hybrid") \
+    .text("machine learning") \
+    .limit(10) \
+    .to_list()
+```
+
+### Indexing
+
+```python
+from lancedb.index import IvfPq, BTree, FTS
+
+# Vector index for fast search
+table.create_index(
+    index=IvfPq(num_partitions=256, num_sub_vectors=16)
+)
+
+# Scalar index for filtering
+table.create_index(column="category", index=BTree())
+
+# Full-text search index
+table.create_index(column="text", index=FTS())
+
+# List indices
+table.list_indices()
+
+# Drop index
+table.drop_index("vector_idx")
+```
+
+### Schema
+
+```python
+import pyarrow as pa
+from lancedb import vector
+
+# Define schema with vector column
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", vector(384)),  # 384-dimensional vector
+    pa.field("text", pa.string()),
+])
+
+table = db.create_table("my_table", schema=schema)
+```
+
+### Embeddings and Auto-Embedding Mode
+
+LanceDB supports automatic embedding generation for both data ingestion and queries.
+
+#### Basic Embedding Setup
+
+```python
+from lancedb.embeddings import get_registry
+
+# Get embedding function from registry
+registry = get_registry()
+model = registry.get("sentence-transformers").create(name="all-MiniLM-L6-v2")
+
+# Create table with auto-embedding
+table = db.create_table(
+    "my_table",
+    data=[{"text": "hello"}, {"text": "world"}],
+    embedding_functions=[model.for_column("text", "vector")]
+)
+
+# Search automatically embeds query
+results = table.search("hello world").limit(10).to_list()
+```
+
+#### Using Pydantic Schema with Source and Vector Fields
+
+The recommended approach is to use Pydantic models with `SourceField` and `VectorField`:
+
+```python
+from lancedb.pydantic import LanceModel, Vector
+from lancedb.embeddings import get_registry
+
+# Define embedding function
+registry = get_registry()
+embeddings = registry.get("openai").create(name="text-embedding-ada-002")
+
+# Define schema with source and vector fields
+class Documents(LanceModel):
+    text: str = embeddings.SourceField()  # Source data to embed
+    vector: Vector(embeddings.ndims()) = embeddings.VectorField()  # Embedding destination
+    metadata: dict  # Additional fields
+
+# Create table with schema
+table = db.create_table("documents", schema=Documents)
+
+# Add data - embeddings generated automatically on insert
+table.add([
+    {"text": "LanceDB is a vector database", "metadata": {"category": "tech"}},
+    {"text": "Python is a programming language", "metadata": {"category": "programming"}}
+])
+
+# Query - embedding generated automatically for search
+results = table.search("database for vectors").limit(5).to_pandas()
+```
+
+**Key Points:**
+- `SourceField()`: Marks the column containing source data that will be embedded
+- `VectorField()`: Marks the column where embeddings will be stored
+- Embeddings are generated automatically during both `add()` and `search()` operations
+- You can have multiple source/vector pairs for different embedding models
+
+#### Multi-Modal Embeddings
+
+For multi-modal data (e.g., images), source and vector columns can be different types:
+
+```python
+from lancedb.embeddings import get_registry
+from lancedb.pydantic import LanceModel, Vector
+
+# CLIP for image-text embeddings
+clip = get_registry().get("open-clip").create()
+
+class Images(LanceModel):
+    image_uri: str = clip.SourceField()  # Image path
+    vector: Vector(clip.ndims()) = clip.VectorField()  # Image embedding
+    caption: str
+
+table = db.create_table("images", schema=Images)
+table.add([{"image_uri": "path/to/image.jpg", "caption": "A cat"}])
+
+# Search with text - CLIP embeds text and searches image embeddings
+results = table.search("cat playing").limit(10).to_pandas()
+
+# Search with image
+from PIL import Image
+query_image = Image.open("query.jpg")
+results = table.search(query_image).limit(10).to_pandas()
+```
+
+#### Manual Embedding (Without Auto-Embedding)
+
+If you prefer to generate embeddings manually:
+
+```python
+import numpy as np
+
+# Define schema without embedding functions
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", pa.list_(pa.float32(), 384)),  # Or use vector(384)
+    pa.field("text", pa.string())
+])
+
+table = db.create_table("manual_embeddings", schema=schema)
+
+# Generate embeddings yourself
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+texts = ["hello world", "goodbye world"]
+embeddings = model.encode(texts)
+
+# Add data with pre-computed embeddings
+data = [
+    {"id": i, "vector": emb.tolist(), "text": text}
+    for i, (emb, text) in enumerate(zip(embeddings, texts))
+]
+table.add(data)
+
+# Search with pre-computed query embedding
+query_emb = model.encode(["greetings"])[0]
+results = table.search(query_emb).limit(10).to_pandas()
+```
+
+#### Rate Limiting and Retries
+
+Embedding functions support automatic retries for rate-limited APIs:
+
+```python
+# Default: 7 retries with exponential backoff
+model = registry.get("openai").create(name="text-embedding-ada-002")
+
+# Custom retry configuration
+model = registry.get("openai").create(name="text-embedding-ada-002", max_retries=10)
+
+# Disable retries
+model = registry.get("openai").create(name="text-embedding-ada-002", max_retries=0)
+```
+
+#### Secure API Key Management
+
+Use variable references instead of hardcoded API keys:
+
+```python
+# Set variable in registry (per-session, not persisted)
+registry = get_registry()
+registry.set_var("openai_api_key", "sk-...")
+
+# Reference variable in config
+model = registry.get("openai").create(
+    name="text-embedding-ada-002",
+    api_key="$var:openai_api_key"
+)
+
+# With default value if variable not set
+model = registry.get("openai").create(
+    name="text-embedding-ada-002",
+    api_key="$var:openai_api_key:default_key_here"
+)
+```
+
+#### Available Embedding Providers
+
+- **openai** - OpenAI embeddings (text-embedding-ada-002, text-embedding-3-small, etc.)
+- **cohere** - Cohere embeddings
+- **sentence-transformers** - Sentence Transformers models
+- **huggingface** - HuggingFace Transformers
+- **open-clip** - OpenCLIP multi-modal (text + image)
+- **gemini** - Google Gemini embeddings
+- **bedrock** - AWS Bedrock embeddings
+- **ollama** - Ollama embeddings
+- **jina** - JinaAI embeddings
+- **voyageai** - VoyageAI embeddings
+- **instructor** - Instructor embeddings
+- **imagebind** - ImageBind multi-modal
+- **colpali** - ColPali vision embeddings
+- And more...
+
+## Data Formats
+
+LanceDB accepts multiple input formats:
+- List of dicts: `[{"col": value}, ...]`
+- Pandas DataFrame: `pd.DataFrame(...)`
+- PyArrow Table: `pa.Table`
+- Polars DataFrame: `pl.DataFrame`
+- Pydantic models
+- HuggingFace Datasets
+
+Output formats:
+- `.to_list()` - List of dicts
+- `.to_pandas()` - Pandas DataFrame
+- `.to_arrow()` - PyArrow Table
+- `.to_polars()` - Polars DataFrame
+
+## Filtering with SQL WHERE Clauses
+
+LanceDB supports SQL-style WHERE clauses powered by Apache DataFusion for filtering query results.
+
+### Basic Filter Syntax
+
+```python
+# Simple comparison
+results = table.search([0.1, 0.2]).where("price < 100").limit(10).to_pandas()
+
+# Multiple conditions with AND/OR
+results = table.search([0.1, 0.2]) \
+    .where("price < 100 AND category = 'books'") \
+    .limit(10).to_pandas()
+
+# Complex conditions
+results = table.search([0.1, 0.2]) \
+    .where("(price < 100 OR discount > 0.5) AND category = 'electronics'") \
+    .limit(10).to_pandas()
+```
+
+### Comparison Operators
+
+```python
+# Numeric comparisons
+.where("price > 50")
+.where("price >= 50")
+.where("price < 100")
+.where("price <= 100")
+.where("price = 99.99")
+.where("price != 99.99")
+
+# String comparisons
+.where("category = 'electronics'")
+.where("category != 'books'")
+
+# IN operator
+.where("category IN ('books', 'electronics', 'toys')")
+.where("id IN (1, 2, 3, 4, 5)")
+```
+
+### Logical Operators
+
+```python
+# AND - all conditions must be true
+.where("price < 100 AND category = 'books' AND in_stock = true")
+
+# OR - any condition must be true
+.where("category = 'books' OR category = 'electronics'")
+
+# NOT - negation
+.where("NOT (category = 'books')")
+
+# Complex combinations
+.where("(category = 'books' OR category = 'dvds') AND price < 50")
+```
+
+### NULL Checks
+
+```python
+# Check for NULL values
+.where("description IS NULL")
+.where("description IS NOT NULL")
+
+# Boolean checks
+.where("in_stock IS TRUE")
+.where("in_stock IS NOT TRUE")
+.where("in_stock IS FALSE")
+.where("in_stock IS NOT FALSE")
+```
+
+### String Pattern Matching
+
+```python
+# LIKE operator (% is wildcard)
+.where("title LIKE '%python%'")  # Contains "python"
+.where("title LIKE 'Python%'")   # Starts with "Python"
+.where("title LIKE '%Guide'")    # Ends with "Guide"
+
+# NOT LIKE
+.where("title NOT LIKE '%deprecated%'")
+
+# Regular expressions
+.where("regexp_match(title, '^[A-Z].*Guide$')")
+```
+
+### Type Casting
+
+```python
+# Cast between types
+.where("CAST(price AS INTEGER) = 100")
+.where("CAST(created_at AS DATE) = date '2024-01-01'")
+```
+
+### Date and Timestamp Literals
+
+```python
+# Date literals
+.where("created_date = date '2024-01-01'")
+.where("created_date > date '2024-01-01'")
+
+# Timestamp literals
+.where("created_at = timestamp '2024-01-01 12:00:00'")
+.where("created_at >= timestamp '2024-01-01 00:00:00'")
+
+# Timestamp with precision
+.where("event_time = timestamp(3) '2024-01-01 12:00:00.123'")  # Milliseconds
+.where("event_time = timestamp(6) '2024-01-01 12:00:00.123456'")  # Microseconds (default)
+.where("event_time = timestamp(9) '2024-01-01 12:00:00.123456789'")  # Nanoseconds
+
+# Decimal literals
+.where("price = decimal(8,3) '123.456'")
+```
+
+### Field Name Escaping
+
+For field names with special characters, uppercase, or SQL keywords, use backticks:
+
+```python
+# Uppercase field names
+.where("`ProductID` = 12345")
+
+# Field names with spaces
+.where("`product name` = 'Widget'")
+
+# SQL keywords as field names
+.where("`ORDER` = 'pending' AND `SELECT` = true")
+
+# Nested fields with spaces
+.where("`user info`.`first name` = 'John'")
+```
+
+### Pre-filtering vs Post-filtering
+
+**Pre-filtering** applies the filter before vector search (faster, may miss results):
+```python
+# Filter first, then search the filtered set
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'", prefilter=True) \
+    .limit(10).to_pandas()
+```
+
+**Post-filtering** applies the filter after vector search (default, more accurate):
+```python
+# Search first, then filter the top results
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'", prefilter=False) \
+    .limit(10).to_pandas()
+
+# Same as above (prefilter=False is default)
+results = table.search([0.1, 0.2]) \
+    .where("category = 'books'") \
+    .limit(10).to_pandas()
+```
+
+**When to use prefilter:**
+- When you have a scalar index on the filter column
+- When the filter will eliminate a large portion of data
+- When you want faster queries and can accept potentially missing some results
+
+**When to use postfilter:**
+- When you want the most accurate top-k results
+- When the filter is selective (keeps most results)
+- Default choice for most use cases
+
+### Filtering Without Vector Search
+
+```python
+# Plain SQL filtering (no vector search)
+results = table.search() \
+    .where("price < 100 AND category = 'books'") \
+    .limit(100).to_pandas()
+```
+
+### SQL Functions
+
+LanceDB supports many SQL functions from Apache DataFusion:
+
+```python
+# String functions
+.where("UPPER(category) = 'BOOKS'")
+.where("LOWER(title) LIKE '%python%'")
+.where("LENGTH(description) > 100")
+
+# Math functions
+.where("ABS(price - 50) < 10")
+.where("ROUND(price) = 100")
+
+# Date functions
+.where("EXTRACT(YEAR FROM created_at) = 2024")
+.where("DATE_TRUNC('day', created_at) = date '2024-01-01'")
+```
+
+Full list of functions: https://arrow.apache.org/datafusion/user-guide/sql/scalar_functions.html
+
+## Query Building and Chaining
+
+LanceDB provides a fluent query API with method chaining.
+
+### Complete Query Building Example
+
+```python
+# Full example with all options
+results = (
+    table.search([0.1, 0.2, 0.3])  # Vector query
+    .metric("cosine")               # Distance metric
+    .where("price < 100", prefilter=True)  # Pre-filter
+    .select(["id", "title", "price"])      # Column selection
+    .limit(20)                      # Number of results
+    .nprobes(40)                    # IVF partitions to search
+    .refine_factor(10)              # Refine with more candidates
+    .with_row_id(True)              # Include row IDs
+    .to_pandas()                    # Return as DataFrame
+)
+```
+
+### Query Methods Reference
+
+#### `.metric(distance_type)` - Set Distance Metric
+```python
+# Supported metrics
+.metric("l2")       # Euclidean distance (default)
+.metric("cosine")   # Cosine similarity (for normalized vectors)
+.metric("dot")      # Dot product (for maximum inner product search)
+.metric("hamming")  # Hamming distance (for binary vectors)
+```
+
+**Choosing a metric:**
+- **l2**: Default, works for most cases
+- **cosine**: Best for text embeddings and normalized vectors
+- **dot**: For maximum inner product search (e.g., recommendation systems)
+- **hamming**: For binary vectors only
+
+#### `.limit(n)` - Limit Results
+```python
+.limit(10)   # Return top 10 results
+.limit(100)  # Return top 100 results
+```
+
+#### `.offset(n)` - Skip Results (Pagination)
+```python
+# Page 1 (results 0-9)
+.limit(10).offset(0)
+
+# Page 2 (results 10-19)
+.limit(10).offset(10)
+
+# Page 3 (results 20-29)
+.limit(10).offset(20)
+```
+
+#### `.select(columns)` - Column Projection
+```python
+# Select specific columns (list)
+.select(["id", "title", "price"])
+
+# Select all columns
+.select(["*"])
+
+# Select with SQL expressions (dict)
+.select({
+    "id": "id",
+    "upper_title": "UPPER(title)",
+    "discounted_price": "price * 0.9"
+})
+```
+
+#### `.where(predicate, prefilter=False)` - Filter Results
+See "Filtering with SQL WHERE Clauses" section above for details.
+
+#### `.nprobes(n)` - IVF Index Tuning
+```python
+# Number of IVF partitions to search (higher = better recall, slower)
+.nprobes(20)   # Fast, lower recall
+.nprobes(50)   # Balanced
+.nprobes(100)  # Slow, higher recall
+
+# Fine-grained control
+.minimum_nprobes(10)
+.maximum_nprobes(50)
+```
+
+**Only applies to IVF-based indices** (IvfFlat, IvfPq, IvfRq). Default is typically 20.
+
+#### `.refine_factor(factor)` - Refine Results
+```python
+# Refine by over-sampling and re-ranking
+.refine_factor(1)    # No refinement (default)
+.refine_factor(10)   # Fetch 10x candidates, re-rank, return top k
+.refine_factor(50)   # Fetch 50x candidates (higher accuracy, slower)
+```
+
+**How it works:** Fetches `limit * refine_factor` candidates, re-ranks with exact distances, returns top `limit`.
+
+#### `.ef(n)` - HNSW Index Tuning
+```python
+# Size of dynamic candidate list for HNSW search
+.ef(100)   # Fast, lower recall
+.ef(200)   # Balanced (default is 1.5 * limit)
+.ef(400)   # Slow, higher recall
+```
+
+**Only applies to HNSW-based indices** (HnswPq, HnswSq).
+
+#### `.distance_range(lower_bound, upper_bound)` - Filter by Distance
+```python
+# Only return results with distance in range
+.distance_range(0.0, 0.5)     # Distance between 0.0 and 0.5
+.distance_range(lower_bound=0.1)      # Distance >= 0.1
+.distance_range(upper_bound=0.8)      # Distance <= 0.8
+```
+
+Useful for removing very similar or very dissimilar results.
+
+#### `.bypass_vector_index()` - Exhaustive Search
+```python
+# Skip vector index, do exhaustive (flat) search
+.bypass_vector_index()
+```
+
+Use when:
+- You want exact results (no approximation)
+- Dataset is small (<100k vectors)
+- Testing or debugging
+
+#### `.with_row_id(include=True)` - Include Row IDs
+```python
+# Include internal row IDs in results
+.with_row_id(True)
+```
+
+Row IDs are useful for updates, deletes, or tracking specific rows.
+
+### Output Format Methods
+
+#### `.to_pandas()` - Return as Pandas DataFrame
+```python
+df = table.search([0.1, 0.2]).limit(10).to_pandas()
+# Returns: pandas.DataFrame
+```
+
+#### `.to_arrow()` - Return as PyArrow Table
+```python
+arrow_table = table.search([0.1, 0.2]).limit(10).to_arrow()
+# Returns: pyarrow.Table
+```
+
+#### `.to_list()` - Return as List of Dicts
+```python
+results = table.search([0.1, 0.2]).limit(10).to_list()
+# Returns: [{"id": 1, "vector": [...], ...}, ...]
+```
+
+#### `.to_polars()` - Return as Polars DataFrame
+```python
+df = table.search([0.1, 0.2]).limit(10).to_polars()
+# Returns: polars.DataFrame
+```
+
+#### `.to_pydantic(model)` - Return as Pydantic Models
+```python
+from lancedb.pydantic import LanceModel
+
+class Result(LanceModel):
+    id: int
+    title: str
+    vector: list[float]
+
+results = table.search([0.1, 0.2]).limit(10).to_pydantic(Result)
+# Returns: list[Result]
+```
+
+#### `.to_batches(batch_size)` - Stream Results
+```python
+# Get result batches (useful for large result sets)
+reader = table.search([0.1, 0.2]).to_batches(batch_size=1000)
+for batch in reader:
+    # Process batch (pyarrow.RecordBatch)
+    process(batch)
+```
+
+## Async API
+
+```python
+import lancedb
+
+# Async connection
+db = await lancedb.connect_async("./my-database")
+
+# Async operations
+table = await db.open_table("my_table")
+await table.add(data)
+results = await table.search([0.1, 0.2]).limit(10).to_list()
+```
+
+## Cloud Features
+
+```python
+# Connect to LanceDB Cloud
+db = lancedb.connect(
+    "db://my-db",
+    api_key="ldb_...",
+    region="us-east-1"
+)
+
+# Configure client
+from lancedb.remote import ClientConfig, TimeoutConfig, RetryConfig
+
+config = ClientConfig(
+    timeout_config=TimeoutConfig(connect_timeout=10.0, read_timeout=60.0),
+    retry_config=RetryConfig(retries=3, backoff_factor=2.0)
+)
+db = lancedb.connect("db://my-db", api_key="ldb_...", client_config=config)
+```
+
+## Vector Index Types
+
+- `IvfFlat` - Inverted file with exact search
+- `IvfPq` - IVF with Product Quantization (fast, less memory)
+- `HnswPq` - HNSW with PQ (faster queries, more memory)
+- `HnswSq` - HNSW with Scalar Quantization
+
+## Full-Text Search Query Types
+
+- `MatchQuery` - Simple text matching
+- `PhraseQuery` - Exact phrase matching
+- `BooleanQuery` - Complex boolean logic (AND/OR/NOT)
+- `BoostQuery` - Weighted queries
+- `MultiMatchQuery` - Search across multiple columns
+
+## Rerankers
+
+```python
+from lancedb.rerankers import RRFReranker, CohereReranker
+
+# Reciprocal Rank Fusion (default for hybrid)
+reranker = RRFReranker()
+
+# Cohere reranker
+reranker = CohereReranker(api_key="...")
+
+# Use in hybrid search
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10)
+```
+
+## Embedding Providers
+
+Built-in support for 20+ embedding providers:
+- OpenAI
+- Cohere
+- HuggingFace Transformers
+- Sentence Transformers
+- Google Gemini
+- AWS Bedrock
+- Ollama
+- JinaAI
+- VoyageAI
+- And more...
+
+## Integration with AI Frameworks
+
+LanceDB integrates with:
+- LangChain - Vector store for LLM applications
+- LlamaIndex - Vector index for retrieval
+- Apache Arrow - Zero-copy data interchange
+- Pandas/Polars - DataFrame operations
+- DuckDB - SQL analytics
+
+## Best Practices
+
+1. **Indexing**: Create indices for large datasets (>100k vectors)
+2. **Batch Operations**: Use batch inserts for better performance
+3. **Schema Design**: Define schema upfront for production use
+4. **Filtering**: Apply filters early in query pipeline
+5. **Distance Metrics**: Choose appropriate metric (cosine for normalized, l2 for raw)
+6. **Hybrid Search**: Use hybrid search when you have both semantic and keyword requirements
+
+## Common Use Cases
+
+- Semantic search over documents
+- Image similarity search
+- Recommendation systems
+- RAG (Retrieval Augmented Generation) for LLMs
+- Anomaly detection
+- Question answering systems
+- Multi-modal search
+
+## Resources
+
+- Documentation: https://lancedb.github.io/lancedb/
+- Python SDK Docs: https://lancedb.github.io/lancedb/python/python/
+- GitHub: https://github.com/lancedb/lancedb
+- Discord: https://discord.gg/zMM32dvNtd
+- Examples: https://github.com/lancedb/vectordb-recipes
+
+---
+
+# ADVANCED TOPICS AND FULL API REFERENCE
+
+## Database Connection API
+
+### Connection Options (Local)
+
+```python
+import lancedb
+
+# Basic local connection
+db = lancedb.connect("./my-database")
+
+# With storage options (for cloud storage backends)
+db = lancedb.connect(
+    "s3://my-bucket/my-database",
+    storage_options={
+        "aws_access_key_id": "...",
+        "aws_secret_access_key": "...",
+        "region": "us-west-2"
+    }
+)
+
+# With read consistency (for multi-process access)
+from datetime import timedelta
+db = lancedb.connect(
+    "./my-database",
+    read_consistency_interval=timedelta(seconds=0)  # Strong consistency
+)
+
+# With session caching
+from lancedb import Session
+session = Session()
+db = lancedb.connect("./my-database", session=session)
+```
+
+### Connection Options (Cloud)
+
+```python
+from lancedb.remote import ClientConfig, TimeoutConfig, RetryConfig, TlsConfig
+
+# Basic cloud connection
+db = lancedb.connect(
+    "db://my-database",
+    api_key="ldb_...",
+    region="us-east-1"  # or "us-west-2", "eu-west-1"
+)
+
+# Advanced configuration
+config = ClientConfig(
+    timeout_config=TimeoutConfig(
+        connect_timeout=10.0,  # Connection timeout in seconds
+        read_timeout=60.0,     # Read timeout in seconds
+        overall_timeout=300.0  # Overall request timeout
+    ),
+    retry_config=RetryConfig(
+        retries=3,              # Number of retries
+        backoff_factor=2.0,     # Exponential backoff multiplier
+        statuses=[429, 500, 502, 503, 504]  # Retry on these HTTP codes
+    ),
+    tls_config=TlsConfig(
+        use_tls=True,
+        ca_file="/path/to/ca.pem",  # For custom CA
+        # For mTLS:
+        cert_file="/path/to/client.pem",
+        key_file="/path/to/client-key.pem"
+    )
+)
+
+db = lancedb.connect(
+    "db://my-database",
+    api_key="ldb_...",
+    client_config=config,
+    host_override="custom.lancedb.com"  # Custom endpoint
+)
+```
+
+### Database Methods
+
+```python
+# List all tables
+tables = db.table_names()  # Returns: list[str]
+
+# Create table with various modes
+table = db.create_table("my_table", data, mode="create")  # Default, error if exists
+table = db.create_table("my_table", data, mode="overwrite")  # Replace if exists
+table = db.create_table("my_table", data, mode="append")  # Add to existing
+
+# Create table with schema only (no data)
+import pyarrow as pa
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", pa.list_(pa.float32(), 128))
+])
+table = db.create_table("my_table", schema=schema)
+
+# Open table
+table = db.open_table("my_table")
+
+# Check if table exists
+if "my_table" in db.table_names():
+    table = db.open_table("my_table")
+
+# Drop table
+db.drop_table("my_table")
+
+# Rename table (if supported)
+db.rename_table("old_name", "new_name")
+```
+
+## Table API Reference
+
+### Table Properties
+
+```python
+# Get table name
+name = table.name  # str
+
+# Get table schema
+schema = table.schema  # pyarrow.Schema
+
+# Count rows
+count = table.count_rows()  # int
+
+# Get table version
+version = table.version  # int
+
+# List all versions
+versions = table.list_versions()  # list of version info
+
+# Get table statistics
+stats = table.stats()  # dict with size, row count, etc.
+```
+
+### Table Data Operations (Advanced)
+
+#### Add Data with Options
+
+```python
+# Add with mode
+table.add(data, mode="append")   # Add to existing (default)
+table.add(data, mode="overwrite")  # Replace all data
+
+# Add with bad vector handling
+table.add(
+    data,
+    on_bad_vectors="error"  # Error if invalid vectors (default)
+)
+table.add(
+    data,
+    on_bad_vectors="drop"  # Skip rows with invalid vectors
+)
+table.add(
+    data,
+    on_bad_vectors="fill"  # Fill invalid vectors with zeros
+)
+```
+
+#### Update with Complex Conditions
+
+```python
+# Update specific columns
+table.update(
+    where="category = 'books'",
+    values={"price": 19.99, "in_stock": True}
+)
+
+# Update with SQL expressions
+table.update(
+    where="id > 100",
+    values={"price": "price * 0.9"}  # 10% discount
+)
+
+# Update values only (no filter, updates all)
+table.update(values={"status": "active"})
+```
+
+#### Delete Operations
+
+```python
+# Delete with filter
+table.delete("price > 1000")
+
+# Delete by IDs
+ids_to_delete = [1, 2, 3, 4, 5]
+table.delete(f"id IN ({','.join(map(str, ids_to_delete))})")
+
+# Delete all (be careful!)
+table.delete("true")  # Or just use mode="overwrite" on add
+```
+
+#### Merge Insert (Upsert) Patterns
+
+```python
+# Basic merge insert (upsert by ID)
+table.merge_insert("id") \
+    .when_matched_update_all() \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+
+# Selective update on match
+table.merge_insert("id") \
+    .when_matched_update_all(condition="target.price < source.price") \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+
+# Update specific columns
+table.merge_insert("id") \
+    .when_matched_update({"price": "source.price", "updated_at": "source.updated_at"}) \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+
+# Conditional insert
+table.merge_insert("id") \
+    .when_matched_update_all() \
+    .when_not_matched_insert_all(condition="source.status = 'active'") \
+    .execute(new_data)
+
+# No insert, only update existing
+table.merge_insert("id") \
+    .when_matched_update_all() \
+    .execute(new_data)
+
+# No update, only insert new
+table.merge_insert("id") \
+    .when_not_matched_insert_all() \
+    .execute(new_data)
+```
+
+### Schema Operations
+
+```python
+# Add columns
+table.add_columns({"new_column": "CAST(price AS INTEGER)"})
+
+# Drop columns
+table.drop_columns(["old_column", "unused_column"])
+
+# Alter column data types
+table.alter_columns({"price": pa.field("price", pa.float64())})
+```
+
+### Version Management
+
+```python
+# List all versions
+versions = table.list_versions()
+for v in versions:
+    print(f"Version {v['version']}: {v['metadata']}")
+
+# Checkout specific version
+table.checkout(version=5)
+
+# Checkout latest version
+table.checkout_latest()
+
+# Restore to specific version
+table.restore(version=3)
+
+# Create named version tag
+table.create_tag("v1.0", version=10)
+
+# List tags
+tags = table.list_tags()
+
+# Delete tag
+table.delete_tag("v1.0")
+```
+
+### Table Maintenance and Optimization
+
+```python
+# Compact small files
+stats = table.compact_files()
+print(f"Compacted {stats.fragments_removed} fragments")
+
+# Cleanup old versions
+stats = table.cleanup_old_versions(older_than=timedelta(days=7))
+print(f"Removed {stats.bytes_removed} bytes")
+
+# Optimize table (compact + cleanup)
+stats = table.optimize(
+    cleanup_older_than=timedelta(days=7),
+    target_rows_per_fragment=1024*1024  # 1M rows per file
+)
+
+# Vacuum to reclaim disk space (removes deleted data)
+table.vacuum()
+```
+
+## Index Configuration (Comprehensive)
+
+### Vector Indices
+
+#### IvfFlat (Inverted File with Flat Vectors)
+
+```python
+from lancedb.index import IvfFlat
+
+# Basic IVF-Flat index
+table.create_index(
+    metric="l2",  # or "cosine", "dot"
+    index=IvfFlat(num_partitions=256)
+)
+
+# Tuning parameters:
+# - num_partitions: Number of clusters (√N to N/1000 typical)
+#   - More partitions = faster search, but may reduce recall
+#   - Fewer partitions = slower search, better recall
+# - Use for: Medium datasets (100k-10M vectors), when memory is not a constraint
+```
+
+#### IvfPq (IVF with Product Quantization)
+
+```python
+from lancedb.index import IvfPq
+
+# IVF-PQ for memory efficiency
+table.create_index(
+    metric="cosine",
+    index=IvfPq(
+        num_partitions=256,
+        num_sub_vectors=16,  # Divide vector into sub-vectors
+        num_bits=8,          # Bits per sub-vector (default 8)
+        max_iterations=50    # K-means iterations
+    )
+)
+
+# Tuning parameters:
+# - num_sub_vectors: More = better accuracy, more memory
+# - num_bits: 4, 6, or 8 (8 is default, best quality)
+# - Use for: Large datasets (10M+ vectors), when memory is limited
+```
+
+#### IvfRq (IVF with Residual Quantization)
+
+```python
+from lancedb.index import IvfRq
+
+# IVF-RQ for better accuracy than PQ
+table.create_index(
+    metric="l2",
+    index=IvfRq(
+        num_partitions=256,
+        num_sub_vectors=16,
+        num_bits=8
+    )
+)
+
+# Better accuracy than PQ at similar compression
+# Use for: When you need better recall than PQ with same memory
+```
+
+#### HnswPq (HNSW with Product Quantization)
+
+```python
+from lancedb.index import HnswPq
+
+# HNSW-PQ for fast queries
+table.create_index(
+    metric="cosine",
+    index=HnswPq(
+        num_levels=7,         # HNSW levels
+        m=20,                 # Connections per node
+        ef_construction=200,  # Size of dynamic candidate list during build
+        num_sub_vectors=16    # PQ sub-vectors
+    )
+)
+
+# Tuning parameters:
+# - m: 12-48 typical (more = better recall, more memory, slower build)
+# - ef_construction: 100-500 (more = better quality, slower build)
+# - Use for: Fast query latency, can afford more memory for index
+```
+
+#### HnswSq (HNSW with Scalar Quantization)
+
+```python
+from lancedb.index import HnswSq
+
+# HNSW-SQ for balance of speed and accuracy
+table.create_index(
+    metric="l2",
+    index=HnswSq(
+        num_levels=7,
+        m=20,
+        ef_construction=200
+    )
+)
+
+# Less compression than PQ but faster and more accurate
+# Use for: When you can afford more memory than PQ but want speed
+```
+
+### Scalar Indices
+
+#### BTree Index
+
+```python
+from lancedb.index import BTree
+
+# B-Tree for sorted columns (range queries)
+table.create_index(column="price", index=BTree())
+table.create_index(column="timestamp", index=BTree())
+
+# Good for: Range queries (>, <, BETWEEN), sorted scans
+# Use when: Column has high cardinality, range filtering common
+```
+
+#### Bitmap Index
+
+```python
+from lancedb.index import Bitmap
+
+# Bitmap for low-cardinality columns
+table.create_index(column="category", index=Bitmap())
+table.create_index(column="status", index=Bitmap())
+
+# Good for: Equality filters, set operations
+# Use when: Column has low cardinality (<1000 unique values)
+```
+
+#### LabelList Index
+
+```python
+from lancedb.index import LabelList
+
+# Index for array/list columns
+table.create_index(column="tags", index=LabelList())
+
+# Good for: Filtering on array contains
+# Example: .where("'electronics' IN tags")
+```
+
+### Full-Text Search Index
+
+```python
+from lancedb.index import FTS
+
+# Basic FTS index
+table.create_index(column="text", index=FTS())
+
+# With language-specific processing
+table.create_index(
+    column="text",
+    index=FTS(
+        language="English",  # Or: French, German, Spanish, etc.
+        stem=True,           # Enable stemming
+        remove_stop_words=True,
+        ascii_folding=True,  # Convert accents to ASCII
+        lower_case=True,
+        max_token_length=40,
+        with_position=True   # Store token positions for phrase queries
+    )
+)
+
+# Custom tokenizer
+table.create_index(
+    column="text",
+    index=FTS(
+        base_tokenizer="whitespace",  # Or: "simple", "raw", "ngram"
+        language="French"
+    )
+)
+
+# Supported languages:
+# English, Arabic, Danish, Dutch, Finnish, French, German, Greek,
+# Hungarian, Italian, Norwegian, Portuguese, Romanian, Russian,
+# Spanish, Swedish, Tamil, Turkish, and more
+```
+
+### Index Management
+
+```python
+# List all indices
+indices = table.list_indices()
+for idx in indices:
+    print(f"{idx['name']}: {idx['type']} on {idx['columns']}")
+
+# Drop index by name
+table.drop_index("vector_idx")
+
+# Check if index exists
+indices = table.list_indices()
+has_vector_idx = any(idx['name'] == 'vector_idx' for idx in indices)
+```
+
+## Full-Text Search (Advanced)
+
+### FTS Query Types
+
+```python
+from lancedb.query import (
+    MatchQuery, PhraseQuery, BooleanQuery, BoostQuery,
+    MultiMatchQuery, Occur
+)
+
+# Match query with fuzzy matching
+q = MatchQuery(
+    query="machine lerning",  # Typo
+    field="text",
+    fuzziness=2,              # Allow 2 character edits
+    prefix_length=0           # Minimum prefix match
+)
+
+# Phrase query (exact phrase)
+q = PhraseQuery(
+    query="machine learning",
+    field="text",
+    slop=0  # Number of words that can appear between terms
+)
+
+# Phrase with slop
+q = PhraseQuery(
+    query="machine learning",
+    field="text",
+    slop=2  # "machine X Y learning" would match
+)
+
+# Boolean query (AND/OR/NOT)
+q = BooleanQuery([
+    (Occur.MUST, MatchQuery("machine learning", "text")),      # Must have
+    (Occur.SHOULD, MatchQuery("deep learning", "text")),       # Nice to have
+    (Occur.MUST_NOT, MatchQuery("deprecated", "text"))         # Must not have
+])
+
+# Using boolean operators
+q = MatchQuery("cat", "text") & MatchQuery("dog", "text")  # AND
+q = MatchQuery("cat", "text") | MatchQuery("dog", "text")  # OR
+q = ~MatchQuery("cat", "text")  # NOT
+
+# Boost query (prefer some terms)
+q = BoostQuery(
+    positive=MatchQuery("beautiful scenery", "description"),   # Boost these
+    negative=MatchQuery("crowded tourist trap", "description") # Penalize these
+)
+
+# Multi-match (search across multiple fields)
+q = MultiMatchQuery(
+    query="python programming",
+    fields=["title", "description", "content"]
+)
+```
+
+### FTS with Filters
+
+```python
+# Combine FTS with SQL filters
+results = table.search("machine learning", query_type="fts") \
+    .where("published_date > date '2023-01-01'") \
+    .limit(10).to_pandas()
+
+# Pre-filter for performance
+results = table.search("machine learning", query_type="fts") \
+    .where("category = 'AI'", prefilter=True) \
+    .limit(10).to_pandas()
+```
+
+## Hybrid Search (Advanced)
+
+### Hybrid Search Configuration
+
+```python
+from lancedb.rerankers import RRFReranker, LinearCombinationReranker, MrrReranker
+
+# Default hybrid search (uses RRF)
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .limit(10).to_pandas()
+
+# With RRF reranker (Reciprocal Rank Fusion)
+reranker = RRFReranker(k=60)  # Constant for RRF formula
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+
+# With Linear Combination
+reranker = LinearCombinationReranker(weight=0.7)  # 0.7 vector + 0.3 FTS
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+
+# With MRR (Maximum Marginal Relevance)
+reranker = MrrReranker(lambda_param=0.5)  # Diversity parameter
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+```
+
+### External Rerankers
+
+```python
+from lancedb.rerankers import CohereReranker, OpenAIReranker, CrossEncoderReranker
+
+# Cohere reranker
+reranker = CohereReranker(api_key="...", model="rerank-english-v2.0")
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+
+# OpenAI reranker (GPT-based)
+reranker = OpenAIReranker(api_key="...", model="gpt-4")
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+
+# Cross-encoder reranker (local model)
+reranker = CrossEncoderReranker(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+results = table.search([0.1, 0.2], query_type="hybrid") \
+    .text("machine learning") \
+    .rerank(reranker=reranker) \
+    .limit(10).to_pandas()
+```
+
+## Advanced Schema Design
+
+### Working with Complex Types
+
+```python
+import pyarrow as pa
+from lancedb import vector
+
+# Schema with nested structs
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", vector(384)),
+    pa.field("metadata", pa.struct([
+        ("title", pa.string()),
+        ("author", pa.string()),
+        ("tags", pa.list_(pa.string()))
+    ])),
+    pa.field("embedding_metadata", pa.map_(pa.string(), pa.float64()))
+])
+
+table = db.create_table("documents", schema=schema)
+
+# Add data with nested structures
+table.add([{
+    "id": 1,
+    "vector": [0.1] * 384,
+    "metadata": {
+        "title": "LanceDB Guide",
+        "author": "John Doe",
+        "tags": ["database", "vector", "ai"]
+    },
+    "embedding_metadata": {"model": "ada-002", "cost": 0.0001}
+}])
+
+# Query nested fields
+results = table.search([0.1]*384) \
+    .where("metadata.author = 'John Doe'") \
+    .select(["id", "metadata.title", "metadata.tags"]) \
+    .to_pandas()
+```
+
+### Large Binary/Blob Data
+
+```python
+# Store images, documents, etc. as binary
+schema = pa.schema([
+    pa.field("id", pa.int64()),
+    pa.field("vector", vector(512)),
+    pa.field("image_data", pa.binary()),
+    pa.field("metadata", pa.string())
+])
+
+# Add image data
+with open("image.jpg", "rb") as f:
+    image_bytes = f.read()
+
+table.add([{
+    "id": 1,
+    "vector": image_embedding,
+    "image_data": image_bytes,
+    "metadata": "cat photo"
+}])
+```
+
+## Performance Optimization
+
+### Batch Operations
+
+```python
+# Batch insert for better performance
+batch_size = 10000
+for i in range(0, len(all_data), batch_size):
+    batch = all_data[i:i+batch_size]
+    table.add(batch)
+
+# Use record batch reader for streaming large datasets
+import pyarrow as pa
+
+def data_generator():
+    for batch in large_dataset_batches:
+        yield pa.RecordBatch.from_pylist(batch)
+
+schema = pa.schema([...])
+reader = pa.RecordBatchReader.from_batches(schema, data_generator())
+table.add(reader)
+```
+
+### Query Optimization
+
+```python
+# 1. Use prefilter with scalar indices
+table.create_index(column="category", index=BTree())
+results = table.search(query_vector) \
+    .where("category = 'electronics'", prefilter=True) \
+    .limit(10).to_pandas()
+
+# 2. Use column selection to reduce data transfer
+results = table.search(query_vector) \
+    .select(["id", "title", "price"]) \
+    .limit(10).to_pandas()
+
+# 3. Tune index parameters
+# For IVF: balance nprobes vs latency
+results = table.search(query_vector).nprobes(20).limit(10).to_pandas()  # Fast
+results = table.search(query_vector).nprobes(100).limit(10).to_pandas()  # Accurate
+
+# For HNSW: tune ef
+results = table.search(query_vector).ef(100).limit(10).to_pandas()  # Fast
+results = table.search(query_vector).ef(400).limit(10).to_pandas()  # Accurate
+
+# 4. Use refine_factor for better accuracy
+results = table.search(query_vector) \
+    .refine_factor(10) \
+    .limit(10).to_pandas()
+```
+
+### Storage Optimization
+
+```python
+# Compact files regularly
+table.compact_files(
+    target_rows_per_fragment=1024*1024,  # 1M rows per file
+    max_rows_per_group=1024              # Row group size
+)
+
+# Cleanup old versions
+table.cleanup_old_versions(older_than=timedelta(days=7))
+
+# Optimize (compact + cleanup)
+table.optimize(
+    cleanup_older_than=timedelta(days=7),
+    target_rows_per_fragment=1024*1024
+)
+```
+
+## Error Handling
+
+```python
+from lancedb.exceptions import MissingValueError, MissingColumnError
+
+try:
+    table = db.open_table("non_existent")
+except FileNotFoundError:
+    print("Table does not exist")
+
+try:
+    results = table.search([0.1, 0.2]) \
+        .where("invalid_column = 1") \
+        .to_pandas()
+except Exception as e:
+    print(f"Query error: {e}")
+
+# Handle bad vectors
+try:
+    table.add(data_with_invalid_vectors, on_bad_vectors="error")
+except ValueError as e:
+    print(f"Invalid vectors: {e}")
+    # Retry with drop or fill
+    table.add(data_with_invalid_vectors, on_bad_vectors="drop")
+```
+
+## Production Deployment Patterns
+
+### Connection Pooling and Reuse
+
+```python
+# For web applications, reuse connection
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def get_db():
+    return lancedb.connect("./my-database")
+
+# Use in requests
+def search_handler(query_vector):
+    db = get_db()
+    table = db.open_table("vectors")
+    return table.search(query_vector).limit(10).to_list()
+```
+
+### Async Operations for High Throughput
+
+```python
+import asyncio
+import lancedb
+
+async def process_queries(queries):
+    db = await lancedb.connect_async("./my-database")
+    table = await db.open_table("vectors")
+    
+    tasks = []
+    for q in queries:
+        task = table.search(q).limit(10).to_list()
+        tasks.append(task)
+    
+    results = await asyncio.gather(*tasks)
+    return results
+
+# Run
+queries = [[0.1]*384 for _ in range(100)]
+results = asyncio.run(process_queries(queries))
+```
+
+### Monitoring and Logging
+
+```python
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def search_with_metrics(table, query_vector):
+    start = time.time()
+    try:
+        results = table.search(query_vector).limit(10).to_pandas()
+        latency = time.time() - start
+        logger.info(f"Search completed in {latency:.3f}s, returned {len(results)} results")
+        return results
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        raise
+```
+
+## Integration Examples
+
+### LangChain Integration
+
+```python
+from langchain.vectorstores import LanceDB
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import TextLoader
+
+# Load and split documents
+loader = TextLoader("document.txt")
+documents = loader.load()
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+docs = text_splitter.split_documents(documents)
+
+# Create LanceDB vector store
+embeddings = OpenAIEmbeddings()
+db = lancedb.connect("./lancedb")
+vectorstore = LanceDB.from_documents(docs, embeddings, connection=db)
+
+# Similarity search
+query = "What is LanceDB?"
+results = vectorstore.similarity_search(query, k=5)
+
+# As retriever
+retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+```
+
+### LlamaIndex Integration
+
+```python
+from llama_index import VectorStoreIndex, ServiceContext
+from llama_index.vector_stores import LanceDBVectorStore
+from llama_index.storage.storage_context import StorageContext
+import lancedb
+
+# Create LanceDB vector store
+db = lancedb.connect("./lancedb")
+vector_store = LanceDBVectorStore(uri="./lancedb", table_name="documents")
+
+# Create index
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_documents(
+    documents,
+    storage_context=storage_context
+)
+
+# Query
+query_engine = index.as_query_engine()
+response = query_engine.query("What is LanceDB?")
+```
+
+### DuckDB Integration
+
+```python
+import duckdb
+import lancedb
+
+# Create LanceDB table
+db = lancedb.connect("./lancedb")
+table = db.create_table("data", data)
+
+# Query with DuckDB
+con = duckdb.connect()
+results = con.execute("""
+    SELECT id, title, price
+    FROM lance_scan('./lancedb/data.lance')
+    WHERE price < 100
+    ORDER BY price DESC
+    LIMIT 10
+""").fetchdf()
+```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+#### Issue: Slow Search Performance
+
+```python
+# Solution 1: Create vector index
+table.create_index(metric="cosine", index=IvfPq(num_partitions=256, num_sub_vectors=16))
+
+# Solution 2: Use prefilter with scalar index
+table.create_index(column="category", index=BTree())
+results = table.search(q).where("category = 'books'", prefilter=True).to_pandas()
+
+# Solution 3: Reduce result size
+results = table.search(q).select(["id", "title"]).limit(10).to_pandas()
+
+# Solution 4: Compact files
+table.compact_files()
+```
+
+#### Issue: High Memory Usage
+
+```python
+# Use PQ for compression
+table.create_index(metric="l2", index=IvfPq(num_partitions=256, num_sub_vectors=16))
+
+# Stream results instead of loading all
+for batch in table.search(q).to_batches(batch_size=1000):
+    process(batch)
+
+# Select only needed columns
+results = table.search(q).select(["id"]).to_pandas()
+```
+
+#### Issue: Inconsistent Results Across Processes
+
+```python
+# Enable strong consistency
+from datetime import timedelta
+db = lancedb.connect("./db", read_consistency_interval=timedelta(seconds=0))
+```
+
+#### Issue: Embedding API Rate Limits
+
+```python
+# Configure retries
+from lancedb.embeddings import get_registry
+model = get_registry().get("openai").create(
+    name="text-embedding-ada-002",
+    max_retries=10  # Increase retries
+)
+
+# Or implement custom rate limiting
+import time
+from ratelimit import limits, sleep_and_retry
+
+@sleep_and_retry
+@limits(calls=50, period=60)  # 50 calls per minute
+def add_with_rate_limit(table, data):
+    return table.add(data)
+```
+
+## Additional Resources and Examples
+
+### Complete RAG Example
+
+```python
+import lancedb
+from lancedb.embeddings import get_registry
+from lancedb.pydantic import LanceModel, Vector
+
+# Setup
+db = lancedb.connect("./rag_db")
+embeddings = get_registry().get("openai").create()
+
+class Document(LanceModel):
+    text: str = embeddings.SourceField()
+    vector: Vector(embeddings.ndims()) = embeddings.VectorField()
+    source: str
+    page: int
+
+# Ingest documents
+docs = [
+    {"text": "LanceDB is a vector database...", "source": "docs.txt", "page": 1},
+    {"text": "It supports hybrid search...", "source": "docs.txt", "page": 2},
+]
+table = db.create_table("documents", schema=Document)
+table.add(docs)
+table.create_fts_index("text")
+
+# Hybrid search for retrieval
+def retrieve(query: str, k: int = 5):
+    results = table.search(query, query_type="hybrid") \
+        .limit(k) \
+        .to_pydantic(Document)
+    return results
+
+# Use with LLM
+def rag_query(question: str):
+    # Retrieve relevant docs
+    docs = retrieve(question, k=3)
+    context = "\n\n".join([doc.text for doc in docs])
+    
+    # Generate answer (pseudo-code)
+    prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+    answer = llm.generate(prompt)
+    return answer, docs
+```
+
+### Multi-Tenant Pattern
+
+```python
+# Schema with tenant ID
+class MultiTenantDoc(LanceModel):
+    tenant_id: str
+    text: str = embeddings.SourceField()
+    vector: Vector(embeddings.ndims()) = embeddings.VectorField()
+
+table = db.create_table("multi_tenant", schema=MultiTenantDoc)
+table.create_index(column="tenant_id", index=BTree())
+
+# Query for specific tenant
+def search_tenant(tenant_id: str, query: str):
+    return table.search(query) \
+        .where(f"tenant_id = '{tenant_id}'", prefilter=True) \
+        .limit(10).to_pandas()
+```
+
+### Recommendation System
+
+```python
+# User-item embeddings
+class UserVector(LanceModel):
+    user_id: int
+    vector: Vector(128)
+    preferences: dict
+
+class ItemVector(LanceModel):
+    item_id: int
+    vector: Vector(128)
+    category: str
+    metadata: dict
+
+# Find similar items
+def find_similar_items(item_id: int, k: int = 10):
+    item = items_table.search() \
+        .where(f"item_id = {item_id}") \
+        .to_pydantic(ItemVector)[0]
+    
+    similar = items_table.search(item.vector) \
+        .where(f"item_id != {item_id}") \
+        .limit(k).to_pydantic(ItemVector)
+    return similar
+
+# Personalized recommendations
+def recommend_for_user(user_id: int, k: int = 10):
+    user = users_table.search() \
+        .where(f"user_id = {user_id}") \
+        .to_pydantic(UserVector)[0]
+    
+    recommendations = items_table.search(user.vector) \
+        .limit(k).to_pydantic(ItemVector)
+    return recommendations
+```
+
+---
+
+**End of LLM-full.txt**
+
+For the latest documentation, visit:
+- Main docs: https://lancedb.github.io/lancedb/
+- Python API: https://lancedb.github.io/lancedb/python/python/
+- Examples: https://github.com/lancedb/vectordb-recipes
