@@ -2,12 +2,15 @@
 lancedb>=0.22.0
 pyarrow>=14.0.0
 
-# Deep learning frameworks
-torch>=2.0.0
-torchvision>=0.15.0
+# ONNX Runtime for efficient inference
+onnxruntime-gpu>=1.16.0  # Use onnxruntime>=1.16.0 for CPU-only
+# For CPU only: pip install onnxruntime>=1.16.0
 
-# Vision models
-open-clip-torch>=2.20.0
+# Model utilities
+transformers>=4.35.0  # For CLIP tokenizer
+huggingface-hub>=0.19.0  # For model downloads
+
+# Image processing
 pillow>=10.0.0
 
 # Video processing

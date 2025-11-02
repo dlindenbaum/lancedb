@@ -85,12 +85,14 @@ The system uses two types of embeddings:
 #### 1. CLIP Embeddings (Semantic)
 - Best for: Text-to-image search, semantic understanding
 - Use case: "Find frames with American flag"
-- Dimension: 512 (ViT-B/32) or 768 (ViT-L/14)
+- Dimension: 512 (clip_vit_b32) or 512 (clip_vit_b16)
+- **Uses ONNX Runtime for efficient inference**
 
 #### 2. DINOv3 Embeddings (Visual)
 - Best for: Visual similarity, fine-grained features
 - Use case: Find frames that look exactly like a reference
-- Dimension: 768 (vitb14) or 1024 (vitl14)
+- Dimension: 384 (dinov2_vits14) or 768 (dinov2_vitb14)
+- **Uses ONNX Runtime for efficient inference**
 
 ### Search Modes
 
@@ -268,16 +270,16 @@ search.index_video(video, "detailed_vid", fps=10)
 ### Model Selection
 
 ```python
-# Fast (ViT-B/32): ~100ms per image
+# Fast (CLIP ViT-B/32): ~100ms per image
 search = HybridVideoSearch(
-    clip_model="ViT-B-32",
+    clip_model="clip_vit_b32",
     dino_model="dinov2_vits14"
 )
 
-# Accurate (ViT-L/14): ~300ms per image
+# More accurate (CLIP ViT-B/16): ~150ms per image
 search = HybridVideoSearch(
-    clip_model="ViT-L-14",
-    dino_model="dinov2_vitl14"
+    clip_model="clip_vit_b16",
+    dino_model="dinov2_vitb14"
 )
 
 # Fast indexing (CLIP only)
@@ -332,7 +334,7 @@ search = HybridVideoSearch(use_dino=False)
 
 **Solution 1: Use faster CLIP model**
 ```python
-search = HybridVideoSearch(clip_model="ViT-B-32")
+search = HybridVideoSearch(clip_model="clip_vit_b32")
 ```
 
 **Solution 2: Reduce FPS**
@@ -368,7 +370,7 @@ results = search.hybrid_search(
 **Solution 3: Try different CLIP model**
 ```python
 # Larger model = better accuracy
-search = HybridVideoSearch(clip_model="ViT-L-14")
+search = HybridVideoSearch(clip_model="clip_vit_b16")
 ```
 
 ### Issue: No Detections in Object Localization

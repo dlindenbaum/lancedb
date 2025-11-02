@@ -1,10 +1,12 @@
 # Hybrid Video Search with CLIP + DINOv3 + Face Recognition + LanceDB
 
 A comprehensive multimodal video search system that combines:
-- **CLIP**: Semantic text-to-image search ("American flag in background", "person wearing red")
-- **DINOv3**: Fine-grained visual features for precise object localization
+- **CLIP (ONNX)**: Semantic text-to-image search ("American flag in background", "person wearing red")
+- **DINOv3 (ONNX)**: Fine-grained visual features for precise object localization
 - **Face Recognition**: Detect, recognize, and track faces using DeepFace
 - **LanceDB**: High-performance vector storage and retrieval
+
+**🚀 All models use ONNX Runtime for efficient, lightweight inference without PyTorch dependency!**
 
 ## Features
 
@@ -17,6 +19,7 @@ A comprehensive multimodal video search system that combines:
 - 📊 **Face Analytics**: Age, gender, and demographic analysis
 - ⏱️ **Person Tracking**: Track individuals across video timeline
 - ⚡ **Fast & Scalable**: Built on LanceDB for efficient vector search
+- 🪶 **Lightweight**: ONNX models for efficient inference without heavy ML frameworks
 
 ## Architecture
 
@@ -270,14 +273,14 @@ dino_results = search.db.open_table("dino_embeddings").search(query_vec).limit(2
 combined = search.combine_results(clip_results, dino_results, weights=[0.6, 0.4])
 ```
 
-### Custom Embedding Functions
+### ONNX Model Options
 
 ```python
-from lancedb.embeddings import OpenClipEmbeddings
+# Fast: CLIP ViT-B/32 (~100ms per image)
+search = HybridVideoSearch(clip_model="clip_vit_b32", dino_model="dinov2_vits14")
 
-# Use different CLIP models for different purposes
-semantic_embeddings = OpenClipEmbeddings(name="ViT-L-14", pretrained="laion2b_s32b_b82k")
-fast_embeddings = OpenClipEmbeddings(name="ViT-B-32", pretrained="laion2b_s34b_b79k")
+# More accurate: CLIP ViT-B/16 (~150ms per image)
+search = HybridVideoSearch(clip_model="clip_vit_b16", dino_model="dinov2_vitb14")
 ```
 
 ## Troubleshooting
@@ -295,8 +298,8 @@ search.index_video(video_path, fps=1, max_frames=1000)
 ### Slow Indexing
 
 ```python
-# Use faster CLIP model
-search = HybridVideoSearch(clip_model="ViT-B-32")
+# Use faster CLIP model (default)
+search = HybridVideoSearch(clip_model="clip_vit_b32")
 
 # Reduce frame rate
 search.index_video(video_path, fps=0.5)

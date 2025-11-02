@@ -1,11 +1,13 @@
 """
-Hybrid Video Search System using CLIP + DINOv3 + Face Recognition + LanceDB
+Hybrid Video Search System using ONNX Models + LanceDB
 
 This module provides a complete multimodal video search system that combines:
-- CLIP for semantic text-to-image search
-- DINOv3 for fine-grained visual features
-- Face detection and recognition
+- CLIP (ONNX) for semantic text-to-image search
+- DINOv3 (ONNX) for fine-grained visual features
+- Face detection and recognition (DeepFace)
 - LanceDB for efficient vector storage and retrieval
+
+All models use ONNX for efficient, lightweight inference without PyTorch dependency.
 """
 
 import io
@@ -15,15 +17,21 @@ from typing import List, Dict, Optional, Union, Tuple
 import warnings
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 # LanceDB imports
 import lancedb
-from lancedb.embeddings import OpenClipEmbeddings
 import pyarrow as pa
+
+# ONNX-based embeddings
+try:
+    from lancedb_onnx_embeddings import create_onnx_clip_embeddings
+    from onnx_embeddings import ONNXDINOv3Embeddings, ONNXCLIPEmbeddings
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    warnings.warn("ONNX models not available. Install with: pip install onnxruntime transformers")
 
 # Face detection imports (optional)
 try:
@@ -37,33 +45,40 @@ except ImportError:
 
 class DINOv3Embeddings:
     """
-    DINOv3 embedding function for fine-grained visual features
+    DINOv3 embedding function using ONNX for efficient inference
+
+    Wrapper around ONNXDINOv3Embeddings for compatibility
     """
 
     def __init__(self, model_name: str = "dinov2_vitb14", device: str = "cuda"):
         """
-        Initialize DINOv3 model
+        Initialize DINOv3 ONNX model
 
         Args:
-            model_name: DINOv3 model variant (dinov2_vits14, dinov2_vitb14, dinov2_vitl14)
+            model_name: DINOv3 model variant (dinov2_vits14, dinov2_vitb14)
             device: Device to run model on ("cuda" or "cpu")
         """
-        self.device = device if torch.cuda.is_available() else "cpu"
+        import onnxruntime as ort
+
+        self.device = device
         self.model_name = model_name
 
-        # Load DINOv3 model
-        self.model = torch.hub.load('facebookresearch/dinov2', model_name)
-        self.model.eval()
-        self.model.to(self.device)
+        # Determine ONNX providers
+        if device == "cuda":
+            available = ort.get_available_providers()
+            if 'CUDAExecutionProvider' in available:
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            else:
+                print("⚠ CUDA requested but not available, using CPU")
+                providers = ['CPUExecutionProvider']
+        else:
+            providers = ['CPUExecutionProvider']
 
-        # Define image transforms
-        from torchvision import transforms
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])
-        ])
+        # Load ONNX model
+        self.onnx_model = ONNXDINOv3Embeddings(
+            model_name=model_name,
+            providers=providers
+        )
 
     def embed_image(self, image: Union[str, bytes, Image.Image]) -> np.ndarray:
         """
@@ -75,25 +90,11 @@ class DINOv3Embeddings:
         Returns:
             Normalized embedding vector
         """
-        # Convert to PIL Image
-        if isinstance(image, str):
-            img = Image.open(image).convert('RGB')
-        elif isinstance(image, bytes):
-            img = Image.open(io.BytesIO(image)).convert('RGB')
-        elif isinstance(image, Image.Image):
-            img = image.convert('RGB')
-        else:
-            raise TypeError(f"Unsupported image type: {type(image)}")
+        # Handle bytes
+        if isinstance(image, bytes):
+            image = Image.open(io.BytesIO(image))
 
-        # Transform and extract features
-        img_tensor = self.transform(img).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            features = self.model(img_tensor)
-            # Normalize
-            features = F.normalize(features, p=2, dim=-1)
-
-        return features.cpu().numpy().squeeze()
+        return self.onnx_model.encode_image(image)
 
     def embed_batch(self, images: List[Union[str, bytes, Image.Image]],
                    batch_size: int = 32) -> List[np.ndarray]:
@@ -107,31 +108,14 @@ class DINOv3Embeddings:
         Returns:
             List of normalized embedding vectors
         """
-        embeddings = []
+        # Convert bytes to PIL Images
+        processed_images = []
+        for img in images:
+            if isinstance(img, bytes):
+                img = Image.open(io.BytesIO(img))
+            processed_images.append(img)
 
-        for i in tqdm(range(0, len(images), batch_size), desc="Extracting DINOv3 features"):
-            batch = images[i:i + batch_size]
-            batch_tensors = []
-
-            for img in batch:
-                if isinstance(img, str):
-                    img = Image.open(img).convert('RGB')
-                elif isinstance(img, bytes):
-                    img = Image.open(io.BytesIO(img)).convert('RGB')
-                elif isinstance(img, Image.Image):
-                    img = img.convert('RGB')
-
-                batch_tensors.append(self.transform(img))
-
-            batch_tensor = torch.stack(batch_tensors).to(self.device)
-
-            with torch.no_grad():
-                features = self.model(batch_tensor)
-                features = F.normalize(features, p=2, dim=-1)
-
-            embeddings.extend(features.cpu().numpy())
-
-        return embeddings
+        return self.onnx_model.encode_images_batch(processed_images, batch_size)
 
     def extract_dense_features(self, image: Union[str, Image.Image]) -> Tuple[np.ndarray, int]:
         """
@@ -145,54 +129,53 @@ class DINOv3Embeddings:
             features_grid: (grid_size, grid_size, feature_dim)
             grid_size: Number of patches per dimension
         """
-        if isinstance(image, str):
-            img = Image.open(image).convert('RGB')
-        else:
-            img = image.convert('RGB')
-
-        img_tensor = self.transform(img).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            # Get patch tokens (exclude CLS token)
-            features = self.model.get_intermediate_layers(img_tensor, n=1)[0]
-            # Remove CLS token
-            patch_features = features[:, 1:, :]
-
-            # Reshape to spatial grid
-            num_patches = patch_features.shape[1]
-            grid_size = int(num_patches ** 0.5)
-
-            patch_features = patch_features.reshape(1, grid_size, grid_size, -1)
-            patch_features = F.normalize(patch_features, p=2, dim=-1)
-
-        return patch_features.squeeze(0).cpu().numpy(), grid_size
+        return self.onnx_model.extract_dense_features(image)
 
 
 class DenseFeatureExtractor:
     """
-    Extract dense patch-level features from CLIP for object localization
+    Extract dense patch-level features using ONNX models for object localization
+
+    Note: For dense features, we use DINOv3 which naturally provides patch features
     """
 
-    def __init__(self, clip_model: str = "ViT-B/32", device: str = "cuda"):
+    def __init__(self, clip_model: str = "clip_vit_b32", device: str = "cuda"):
         """
         Initialize dense feature extractor
 
         Args:
-            clip_model: CLIP model variant
+            clip_model: CLIP model variant (for text encoding)
             device: Device to run model on
         """
-        import clip
+        import onnxruntime as ort
 
-        self.device = device if torch.cuda.is_available() else "cpu"
-        self.model, self.preprocess = clip.load(clip_model, device=self.device)
-        self.model.eval()
+        self.device = device
 
-        import clip as clip_module
-        self.tokenizer = clip_module.tokenize
+        # Determine ONNX providers
+        if device == "cuda":
+            available = ort.get_available_providers()
+            if 'CUDAExecutionProvider' in available:
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            else:
+                providers = ['CPUExecutionProvider']
+        else:
+            providers = ['CPUExecutionProvider']
+
+        # Use CLIP ONNX for text encoding
+        self.clip_model = ONNXCLIPEmbeddings(
+            model_name=clip_model,
+            providers=providers
+        )
+
+        # Use DINOv3 ONNX for dense features (better for localization)
+        self.dino_model = ONNXDINOv3Embeddings(
+            model_name="dinov2_vitb14",
+            providers=providers
+        )
 
     def extract_dense_clip(self, image: Union[str, Image.Image]) -> Tuple[np.ndarray, int]:
         """
-        Extract dense CLIP patch features
+        Extract dense features using DINOv3 (better for localization than CLIP)
 
         Args:
             image: Image path or PIL Image
@@ -200,49 +183,12 @@ class DenseFeatureExtractor:
         Returns:
             Tuple of (features_grid, grid_size)
         """
-        if isinstance(image, str):
-            img = Image.open(image).convert('RGB')
-        else:
-            img = image.convert('RGB')
-
-        img_tensor = self.preprocess(img).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            # Get vision transformer features
-            x = self.model.visual.conv1(img_tensor)
-            x = x.reshape(x.shape[0], x.shape[1], -1)
-            x = x.permute(0, 2, 1)
-
-            # Add class token and position embeddings
-            x = torch.cat([
-                self.model.visual.class_embedding.to(x.dtype) +
-                torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
-                x
-            ], dim=1)
-            x = x + self.model.visual.positional_embedding.to(x.dtype)
-
-            # Apply transformer
-            x = self.model.visual.ln_pre(x)
-            x = x.permute(1, 0, 2)
-            x = self.model.visual.transformer(x)
-            x = x.permute(1, 0, 2)
-
-            # Get patch tokens (exclude CLS)
-            patch_tokens = x[:, 1:, :]
-
-            # Normalize
-            patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
-
-        # Reshape to spatial grid
-        num_patches = patch_tokens.shape[1]
-        grid_size = int(num_patches ** 0.5)
-        patch_tokens = patch_tokens.reshape(1, grid_size, grid_size, -1)
-
-        return patch_tokens.squeeze(0).cpu().numpy(), grid_size
+        # Use DINOv3 which naturally provides patch-level features
+        return self.dino_model.extract_dense_features(image)
 
     def extract_text_features(self, text: str) -> np.ndarray:
         """
-        Extract CLIP text features
+        Extract CLIP text features using ONNX
 
         Args:
             text: Text query
@@ -250,13 +196,7 @@ class DenseFeatureExtractor:
         Returns:
             Normalized text embedding
         """
-        text_tokens = self.tokenizer([text]).to(self.device)
-
-        with torch.no_grad():
-            text_features = self.model.encode_text(text_tokens)
-            text_features = F.normalize(text_features, p=2, dim=-1)
-
-        return text_features.cpu().numpy().squeeze()
+        return self.clip_model.encode_text(text)
 
     def compute_similarity_map(self, patch_features: np.ndarray,
                               text_query: str) -> np.ndarray:
@@ -360,8 +300,7 @@ class HybridVideoSearch:
     """
 
     def __init__(self, db_path: str = "video_search.db",
-                 clip_model: str = "ViT-B-32",
-                 clip_pretrained: str = "laion2b_s34b_b79k",
+                 clip_model: str = "clip_vit_b32",
                  dino_model: str = "dinov2_vitb14",
                  device: str = "cuda",
                  use_dino: bool = True,
@@ -369,14 +308,13 @@ class HybridVideoSearch:
                  face_model: str = "Facenet512",
                  batch_size: int = 32):
         """
-        Initialize hybrid video search system
+        Initialize hybrid video search system with ONNX models
 
         Args:
             db_path: Path to LanceDB database
-            clip_model: CLIP model variant
-            clip_pretrained: CLIP pretrained weights
-            dino_model: DINOv3 model variant
-            device: Device to run models on
+            clip_model: CLIP ONNX model variant (clip_vit_b32 or clip_vit_b16)
+            dino_model: DINOv3 ONNX model variant (dinov2_vits14 or dinov2_vitb14)
+            device: Device to run models on ("cuda" or "cpu")
             use_dino: Whether to use DINOv3 (disable for faster indexing)
             use_face_detection: Whether to enable face detection
             face_model: DeepFace model name (VGG-Face, Facenet, Facenet512, ArcFace, etc.)
@@ -384,17 +322,24 @@ class HybridVideoSearch:
         """
         self.db_path = db_path
         self.db = lancedb.connect(db_path)
-        self.device = device if torch.cuda.is_available() else "cpu"
+
+        # Check ONNX Runtime providers
+        import onnxruntime as ort
+        available_providers = ort.get_available_providers()
+        if device == "cuda" and 'CUDAExecutionProvider' not in available_providers:
+            print("⚠ CUDA requested but not available in ONNX Runtime, falling back to CPU")
+            self.device = "cpu"
+        else:
+            self.device = device
+
         self.use_dino = use_dino
         self.use_face_detection = use_face_detection
         self.batch_size = batch_size
 
-        # Initialize CLIP embeddings
-        self.clip_embeddings = OpenClipEmbeddings(
-            name=clip_model,
-            pretrained=clip_pretrained,
-            device=self.device,
-            batch_size=batch_size
+        # Initialize ONNX CLIP embeddings
+        self.clip_embeddings = create_onnx_clip_embeddings(
+            model_name=clip_model,
+            device=self.device
         )
 
         # Initialize DINOv3 if enabled
