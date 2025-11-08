@@ -5,6 +5,7 @@ This module provides a complete multimodal video search system that combines:
 - CLIP (ONNX) for semantic text-to-image search
 - DINOv3 (ONNX) for fine-grained visual features
 - Face detection and recognition (DeepFace)
+- People tracking (YOLO ONNX + Roboflow Supervision)
 - LanceDB for efficient vector storage and retrieval
 
 All models use ONNX for efficient, lightweight inference without PyTorch dependency.
@@ -41,6 +42,15 @@ except ImportError:
     FACE_DETECTION_AVAILABLE = False
     FaceEmbeddings = None
     FaceDatabase = None
+
+# People tracking imports (optional)
+try:
+    from people_tracking import PeopleTracker, PersonTrack
+    PEOPLE_TRACKING_AVAILABLE = True
+except ImportError:
+    PEOPLE_TRACKING_AVAILABLE = False
+    PeopleTracker = None
+    PersonTrack = None
 
 
 class DINOv3Embeddings:
@@ -306,6 +316,8 @@ class HybridVideoSearch:
                  use_dino: bool = True,
                  use_face_detection: bool = False,
                  face_model: str = "Facenet512",
+                 use_people_tracking: bool = False,
+                 yolo_conf_threshold: float = 0.5,
                  batch_size: int = 32):
         """
         Initialize hybrid video search system with ONNX models
@@ -318,6 +330,8 @@ class HybridVideoSearch:
             use_dino: Whether to use DINOv3 (disable for faster indexing)
             use_face_detection: Whether to enable face detection
             face_model: DeepFace model name (VGG-Face, Facenet, Facenet512, ArcFace, etc.)
+            use_people_tracking: Whether to enable people tracking with YOLO
+            yolo_conf_threshold: Confidence threshold for YOLO person detection
             batch_size: Batch size for embedding extraction
         """
         self.db_path = db_path
@@ -364,6 +378,24 @@ class HybridVideoSearch:
                     device=self.device
                 )
                 print("✓ Face detection enabled")
+
+        # Initialize people tracking if enabled
+        self.people_tracker = None
+        self.use_people_tracking = use_people_tracking
+        if use_people_tracking:
+            if not PEOPLE_TRACKING_AVAILABLE:
+                warnings.warn(
+                    "People tracking requested but dependencies not available. "
+                    "Install with: pip install supervision"
+                )
+            else:
+                self.people_tracker = PeopleTracker(
+                    conf_threshold=yolo_conf_threshold,
+                    device=self.device,
+                    use_face_id=use_face_detection,  # Use face recognition if available
+                    face_model=face_model
+                )
+                print("✓ People tracking enabled")
 
         # Initialize dense feature extractor
         self.dense_extractor = None
@@ -1099,6 +1131,266 @@ class HybridVideoSearch:
             stats["age_min"] = int(df["age"].min())
             stats["age_max"] = int(df["age"].max())
             stats["age_mean"] = float(df["age"].mean())
+
+        return stats
+
+    # ==================== People Tracking Methods ====================
+
+    def track_people_in_video(self, video_path: str, video_id: str,
+                             fps: int = 2, max_frames: Optional[int] = None,
+                             save_tracks: bool = True) -> List:
+        """
+        Track people throughout a video using YOLO + ByteTrack
+
+        Args:
+            video_path: Path to video file
+            video_id: Video identifier
+            fps: Frame extraction rate
+            max_frames: Maximum frames to process
+            save_tracks: Whether to save tracks to database
+
+        Returns:
+            List of PersonTrack objects
+        """
+        if not self.people_tracker:
+            raise ValueError("People tracking not enabled. Initialize with use_people_tracking=True")
+
+        # Track people
+        tracks = self.people_tracker.track_video(
+            video_path=video_path,
+            video_id=video_id,
+            fps=fps,
+            max_frames=max_frames
+        )
+
+        # Save to database if requested
+        if save_tracks and tracks:
+            tracks_data = []
+            for track in tracks:
+                track_dict = {
+                    "track_id": track.track_id,
+                    "video_id": track.video_id,
+                    "first_frame": track.first_frame,
+                    "last_frame": track.last_frame,
+                    "first_timestamp": track.first_timestamp,
+                    "last_timestamp": track.last_timestamp,
+                    "duration": track.duration(),
+                    "num_detections": track.num_detections(),
+                    "bboxes": track.bboxes,
+                    "frame_ids": track.frame_ids,
+                    "timestamps": track.timestamps,
+                    "confidences": track.confidences,
+                    "person_id": track.person_id
+                }
+                tracks_data.append(track_dict)
+
+            # Create or append to people_tracks table
+            if "people_tracks" in self.db.table_names():
+                tracks_table = self.db.open_table("people_tracks")
+                tracks_table.add(tracks_data)
+            else:
+                self.db.create_table("people_tracks", tracks_data)
+
+            print(f"✓ Saved {len(tracks)} tracked people to database")
+
+        return tracks
+
+    def get_tracked_people(self, video_id: Optional[str] = None,
+                          min_duration: float = 0.0,
+                          min_detections: int = 1) -> List[Dict]:
+        """
+        Get tracked people from database
+
+        Args:
+            video_id: Optional video ID to filter by
+            min_duration: Minimum track duration in seconds
+            min_detections: Minimum number of detections
+
+        Returns:
+            List of track dictionaries
+        """
+        if "people_tracks" not in self.db.table_names():
+            return []
+
+        tracks_table = self.db.open_table("people_tracks")
+        df = tracks_table.to_pandas()
+
+        # Filter by video
+        if video_id:
+            df = df[df["video_id"] == video_id]
+
+        # Filter by duration and detections
+        df = df[df["duration"] >= min_duration]
+        df = df[df["num_detections"] >= min_detections]
+
+        return df.to_dict('records')
+
+    def get_person_timeline(self, track_id: int, video_id: str) -> Dict:
+        """
+        Get detailed timeline for a specific tracked person
+
+        Args:
+            track_id: Track ID
+            video_id: Video ID
+
+        Returns:
+            Dictionary with timeline information
+        """
+        if "people_tracks" not in self.db.table_names():
+            return {}
+
+        tracks_table = self.db.open_table("people_tracks")
+        df = tracks_table.to_pandas()
+
+        # Filter for specific track
+        track = df[(df["track_id"] == track_id) & (df["video_id"] == video_id)]
+
+        if len(track) == 0:
+            return {}
+
+        track = track.iloc[0]
+
+        return {
+            "track_id": int(track["track_id"]),
+            "video_id": track["video_id"],
+            "first_frame": int(track["first_frame"]),
+            "last_frame": int(track["last_frame"]),
+            "first_timestamp": float(track["first_timestamp"]),
+            "last_timestamp": float(track["last_timestamp"]),
+            "duration": float(track["duration"]),
+            "num_detections": int(track["num_detections"]),
+            "frame_ids": track["frame_ids"],
+            "timestamps": track["timestamps"],
+            "bboxes": track["bboxes"],
+            "confidences": track["confidences"],
+            "person_id": track.get("person_id")
+        }
+
+    def visualize_person_track(self, track_id: int, video_id: str,
+                              video_path: str, output_path: str,
+                              max_frames: int = 10):
+        """
+        Create a visualization of a person's track across frames
+
+        Args:
+            track_id: Track ID
+            video_id: Video ID
+            video_path: Path to original video
+            output_path: Path to save visualization
+            max_frames: Maximum number of frames to show
+        """
+        timeline = self.get_person_timeline(track_id, video_id)
+
+        if not timeline:
+            print(f"Track {track_id} not found in video {video_id}")
+            return
+
+        # Open video
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # Sample frames evenly
+        frame_ids = timeline["frame_ids"]
+        timestamps = timeline["timestamps"]
+        bboxes = timeline["bboxes"]
+
+        step = max(1, len(frame_ids) // max_frames)
+        selected_indices = list(range(0, len(frame_ids), step))[:max_frames]
+
+        # Create visualization
+        from PIL import Image, ImageDraw, ImageFont
+        frames_to_show = []
+
+        for idx in selected_indices:
+            frame_id = frame_ids[idx]
+            timestamp = timestamps[idx]
+            bbox = bboxes[idx]
+
+            # Seek to frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(timestamp * video_fps))
+            ret, frame = cap.read()
+
+            if not ret:
+                continue
+
+            # Convert to PIL
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+
+            # Draw bbox
+            draw = ImageDraw.Draw(img)
+            x, y, w, h = bbox
+            draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
+            draw.text((x, y - 20), f"Track {track_id} @ {timestamp:.1f}s",
+                     fill="red")
+
+            frames_to_show.append(img)
+
+        cap.release()
+
+        # Create grid
+        if frames_to_show:
+            cols = min(5, len(frames_to_show))
+            rows = (len(frames_to_show) + cols - 1) // cols
+
+            # Resize frames
+            thumb_size = (320, 240)
+            thumbs = [img.resize(thumb_size) for img in frames_to_show]
+
+            # Create grid
+            grid_w = cols * thumb_size[0]
+            grid_h = rows * thumb_size[1]
+            grid = Image.new('RGB', (grid_w, grid_h))
+
+            for i, thumb in enumerate(thumbs):
+                col = i % cols
+                row = i // cols
+                grid.paste(thumb, (col * thumb_size[0], row * thumb_size[1]))
+
+            grid.save(output_path)
+            print(f"✓ Saved track visualization to {output_path}")
+
+    def get_people_tracking_statistics(self, video_id: Optional[str] = None) -> Dict:
+        """
+        Get people tracking statistics
+
+        Args:
+            video_id: Optional video ID to filter by
+
+        Returns:
+            Dictionary with statistics
+        """
+        if "people_tracks" not in self.db.table_names():
+            return {
+                "total_tracks": 0,
+                "avg_duration": 0,
+                "avg_detections": 0
+            }
+
+        tracks_table = self.db.open_table("people_tracks")
+        df = tracks_table.to_pandas()
+
+        if video_id:
+            df = df[df["video_id"] == video_id]
+
+        if len(df) == 0:
+            return {
+                "total_tracks": 0,
+                "avg_duration": 0,
+                "avg_detections": 0
+            }
+
+        stats = {
+            "total_tracks": len(df),
+            "avg_duration": float(df["duration"].mean()),
+            "max_duration": float(df["duration"].max()),
+            "min_duration": float(df["duration"].min()),
+            "avg_detections": float(df["num_detections"].mean()),
+            "max_detections": int(df["num_detections"].max()),
+            "min_detections": int(df["num_detections"].min()),
+            "videos": list(df["video_id"].unique())
+        }
 
         return stats
 

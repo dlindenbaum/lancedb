@@ -28,3 +28,7 @@ deepface>=0.0.79
 tf-keras>=2.15.0  # Required by deepface
 # For GPU: tensorflow[and-cuda]
 # For CPU only: pip install tensorflow
+
+# People tracking (optional)
+supervision>=0.16.0  # For YOLO tracking with ByteTrack
+# Note: YOLO models are automatically downloaded from HuggingFace

@@ -1,9 +1,10 @@
-# Hybrid Video Search with CLIP + DINOv3 + Face Recognition + LanceDB
+# Hybrid Video Search with CLIP + DINOv3 + Face Recognition + People Tracking + LanceDB
 
 A comprehensive multimodal video search system that combines:
 - **CLIP (ONNX)**: Semantic text-to-image search ("American flag in background", "person wearing red")
 - **DINOv3 (ONNX)**: Fine-grained visual features for precise object localization
 - **Face Recognition**: Detect, recognize, and track faces using DeepFace
+- **People Tracking**: Track and identify people using YOLO (ONNX) + Roboflow Supervision
 - **LanceDB**: High-performance vector storage and retrieval
 
 **🚀 All models use ONNX Runtime for efficient, lightweight inference without PyTorch dependency!**
@@ -17,28 +18,33 @@ A comprehensive multimodal video search system that combines:
 - 👤 **Face Detection**: Detect and extract faces from video frames
 - 🔎 **Face Search**: Find specific people across videos
 - 📊 **Face Analytics**: Age, gender, and demographic analysis
-- ⏱️ **Person Tracking**: Track individuals across video timeline
+- 🚶 **People Tracking**: Track people across video with YOLO + ByteTrack
+- 🎭 **Person Identification**: Assign unique IDs to each person and track movement
+- 📈 **Track Analytics**: Duration, frequency, and movement patterns
 - ⚡ **Fast & Scalable**: Built on LanceDB for efficient vector search
 - 🪶 **Lightweight**: ONNX models for efficient inference without heavy ML frameworks
 
 ## Architecture
 
 ```
-┌──────────────┬──────────┬─────────────┬──────────────┬─────────────┐
-│   Model      │  Text    │   Visual    │  Faces       │  Best For   │
-│              │  Search  │  Precision  │              │             │
-├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
-│ CLIP         │   ✓✓✓    │      ✓      │      ✗       │ Semantic    │
-│              │          │             │              │ search      │
-├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
-│ DINOv3       │   ✗      │     ✓✓✓     │      ✗       │ Visual      │
-│              │          │             │              │ similarity  │
-├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
-│ DeepFace     │   ✗      │      ✗      │     ✓✓✓      │ Face        │
-│              │          │             │              │ recognition │
-├──────────────┼──────────┼─────────────┼──────────────┼─────────────┤
-│ All Combined │   ✓✓✓    │     ✓✓✓     │     ✓✓✓      │ Complete    │
-└──────────────┴──────────┴─────────────┴──────────────┴─────────────┘
+┌──────────────┬──────────┬─────────────┬──────────────┬──────────────┬─────────────┐
+│   Model      │  Text    │   Visual    │  Faces       │  Tracking    │  Best For   │
+│              │  Search  │  Precision  │              │              │             │
+├──────────────┼──────────┼─────────────┼──────────────┼──────────────┼─────────────┤
+│ CLIP         │   ✓✓✓    │      ✓      │      ✗       │      ✗       │ Semantic    │
+│              │          │             │              │              │ search      │
+├──────────────┼──────────┼─────────────┼──────────────┼──────────────┼─────────────┤
+│ DINOv3       │   ✗      │     ✓✓✓     │      ✗       │      ✗       │ Visual      │
+│              │          │             │              │              │ similarity  │
+├──────────────┼──────────┼─────────────┼──────────────┼──────────────┼─────────────┤
+│ DeepFace     │   ✗      │      ✗      │     ✓✓✓      │      ✗       │ Face        │
+│              │          │             │              │              │ recognition │
+├──────────────┼──────────┼─────────────┼──────────────┼──────────────┼─────────────┤
+│ YOLO +       │   ✗      │      ✗      │      ✗       │     ✓✓✓      │ Person      │
+│ ByteTrack    │          │             │              │              │ tracking    │
+├──────────────┼──────────┼─────────────┼──────────────┼──────────────┼─────────────┤
+│ All Combined │   ✓✓✓    │     ✓✓✓     │     ✓✓✓      │     ✓✓✓      │ Complete    │
+└──────────────┴──────────┴─────────────┴──────────────┴──────────────┴─────────────┘
 ```
 
 ## Installation
@@ -143,6 +149,58 @@ stats = search.get_face_statistics()
 print(f"Total faces: {stats['total_faces']}")
 print(f"Gender distribution: {stats['gender_distribution']}")
 print(f"Average age: {stats['age_mean']:.1f}")
+```
+
+### 7. People Tracking (YOLO + ByteTrack)
+
+```python
+# Enable people tracking
+search = HybridVideoSearch(
+    db_path="video_search.db",
+    use_people_tracking=True,  # Enable YOLO + ByteTrack
+    yolo_conf_threshold=0.5,   # Detection confidence threshold
+    use_face_detection=True    # Optional: combine with face recognition
+)
+
+# Track all people in a video
+tracks = search.track_people_in_video(
+    video_path="video.mp4",
+    video_id="video_001",
+    fps=2,  # Process 2 frames per second
+    save_tracks=True  # Save to database
+)
+
+print(f"Found {len(tracks)} unique people")
+
+# Get tracked people from database
+all_people = search.get_tracked_people(video_id="video_001")
+
+# Filter by appearance duration
+prominent_people = search.get_tracked_people(
+    video_id="video_001",
+    min_duration=5.0,  # At least 5 seconds
+    min_detections=10  # At least 10 frames
+)
+
+# Get detailed timeline for a specific person
+timeline = search.get_person_timeline(track_id=1, video_id="video_001")
+print(f"Person appeared for {timeline['duration']:.2f}s")
+print(f"Detected in {timeline['num_detections']} frames")
+
+# Visualize a person's track across frames
+search.visualize_person_track(
+    track_id=1,
+    video_id="video_001",
+    video_path="video.mp4",
+    output_path="person_track.jpg",
+    max_frames=10
+)
+
+# Get tracking statistics
+stats = search.get_people_tracking_statistics(video_id="video_001")
+print(f"Total unique people: {stats['total_tracks']}")
+print(f"Average duration: {stats['avg_duration']:.2f}s")
+print(f"Longest appearance: {stats['max_duration']:.2f}s")
 ```
 
 ## Usage Examples
