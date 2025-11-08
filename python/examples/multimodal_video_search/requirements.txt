@@ -32,3 +32,6 @@ tf-keras>=2.15.0  # Required by deepface
 # People tracking (optional)
 supervision>=0.16.0  # For YOLO tracking with ByteTrack
 # Note: YOLO models are automatically downloaded from HuggingFace
+
+# Person clustering (optional)
+scikit-learn>=1.3.0  # For clustering algorithms (DBSCAN, Agglomerative)

@@ -242,6 +242,20 @@ class FaceEmbeddings:
         largest_face = max(detections, key=lambda d: self._bbox_area(d["bbox"]))
         return largest_face.get("embedding")
 
+    def detect_faces_from_image(self, image: Image.Image,
+                               min_confidence: float = 0.9) -> List[Dict]:
+        """
+        Detect faces from a PIL Image (alias for detect_faces for clarity)
+
+        Args:
+            image: PIL Image object
+            min_confidence: Minimum detection confidence
+
+        Returns:
+            List of face detections
+        """
+        return self.detect_faces(image, min_confidence)
+
     def extract_face_crops(self, image: Union[str, np.ndarray, Image.Image],
                           min_confidence: float = 0.9,
                           padding: int = 20) -> List[Tuple[Image.Image, Dict]]:

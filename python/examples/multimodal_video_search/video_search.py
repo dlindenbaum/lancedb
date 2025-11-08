@@ -52,6 +52,15 @@ except ImportError:
     PeopleTracker = None
     PersonTrack = None
 
+# Person clustering imports (optional)
+try:
+    from person_clustering import PersonClusterer, PersonCluster
+    PERSON_CLUSTERING_AVAILABLE = True
+except ImportError:
+    PERSON_CLUSTERING_AVAILABLE = False
+    PersonClusterer = None
+    PersonCluster = None
+
 
 class DINOv3Embeddings:
     """
@@ -1393,6 +1402,310 @@ class HybridVideoSearch:
         }
 
         return stats
+
+    # ==================== Person Clustering Methods ====================
+
+    def cluster_tracked_people(self,
+                               video_ids: Optional[List[str]] = None,
+                               video_paths: Optional[Dict[str, str]] = None,
+                               similarity_threshold: float = 0.6,
+                               clustering_method: str = "dbscan",
+                               save_clusters: bool = True) -> Dict:
+        """
+        Cluster tracked people using face recognition to identify unique individuals
+
+        Args:
+            video_ids: List of video IDs to cluster (None for all)
+            video_paths: Dict mapping video_id -> video_path (required for face extraction)
+            similarity_threshold: Face similarity threshold for same person (0-1)
+            clustering_method: Clustering algorithm ("dbscan" or "agglomerative")
+            save_clusters: Whether to save cluster assignments to database
+
+        Returns:
+            Dictionary of cluster_id -> PersonCluster
+        """
+        if not PERSON_CLUSTERING_AVAILABLE:
+            raise ImportError("Person clustering not available. Ensure person_clustering.py exists")
+
+        if not self.face_embeddings and not self.people_tracker:
+            raise ValueError("Either face detection or people tracking must be enabled")
+
+        # Get tracked people from database
+        if "people_tracks" not in self.db.table_names():
+            print("No tracked people in database")
+            return {}
+
+        tracks_table = self.db.open_table("people_tracks")
+        df = tracks_table.to_pandas()
+
+        # Filter by video IDs if specified
+        if video_ids:
+            df = df[df["video_id"].isin(video_ids)]
+
+        if len(df) == 0:
+            print("No tracks found")
+            return {}
+
+        # Convert to PersonTrack objects
+        tracks = []
+        for _, row in df.iterrows():
+            track = PersonTrack(
+                track_id=int(row["track_id"]),
+                video_id=row["video_id"],
+                first_frame=int(row["first_frame"]),
+                last_frame=int(row["last_frame"]),
+                first_timestamp=float(row["first_timestamp"]),
+                last_timestamp=float(row["last_timestamp"]),
+                bboxes=row["bboxes"],
+                frame_ids=row["frame_ids"],
+                timestamps=row["timestamps"],
+                confidences=row["confidences"],
+                face_embedding=row.get("face_embedding"),
+                person_id=row.get("person_id")
+            )
+            tracks.append(track)
+
+        print(f"Clustering {len(tracks)} tracks...")
+
+        # Initialize clusterer
+        clusterer = PersonClusterer(
+            face_model=self.face_embeddings.model_name if self.face_embeddings else "Facenet512",
+            similarity_threshold=similarity_threshold,
+            clustering_method=clustering_method,
+            device=self.device
+        )
+
+        # Perform clustering
+        clusters = clusterer.cluster_tracks(
+            tracks=tracks,
+            video_paths=video_paths or {},
+            extract_faces=True
+        )
+
+        # Save cluster assignments to database if requested
+        if save_clusters and clusters:
+            # Update people_tracks table with cluster IDs
+            cluster_assignments = []
+
+            for cluster_id, cluster in clusters.items():
+                for track_id, video_id in zip(cluster.track_ids, cluster.video_ids):
+                    cluster_assignments.append({
+                        "track_id": track_id,
+                        "video_id": video_id,
+                        "cluster_id": cluster_id,
+                        "person_name": cluster.person_name
+                    })
+
+            # Store in new table
+            if "person_clusters" in self.db.table_names():
+                cluster_table = self.db.open_table("person_clusters")
+                cluster_table.add(cluster_assignments)
+            else:
+                self.db.create_table("person_clusters", cluster_assignments)
+
+            print(f"✓ Saved cluster assignments to database")
+
+        # Store clusterer for later use
+        self.person_clusterer = clusterer
+
+        return clusters
+
+    def identify_person_from_image(self,
+                                   query_image: str,
+                                   min_similarity: float = 0.6) -> Optional[Dict]:
+        """
+        Identify which person cluster a query image belongs to
+
+        Args:
+            query_image: Path to image of person
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            Dictionary with cluster info or None if no match
+        """
+        if not hasattr(self, 'person_clusterer') or self.person_clusterer is None:
+            raise ValueError("Must run cluster_tracked_people() first")
+
+        result = self.person_clusterer.identify_person(query_image, min_similarity)
+
+        if result is None:
+            return None
+
+        cluster_id, similarity = result
+        cluster = self.person_clusterer.clusters[cluster_id]
+
+        return {
+            "cluster_id": cluster_id,
+            "person_name": cluster.person_name,
+            "similarity": similarity,
+            "num_tracks": cluster.num_tracks(),
+            "num_videos": cluster.num_videos(),
+            "track_ids": cluster.track_ids,
+            "video_ids": cluster.video_ids
+        }
+
+    def assign_person_names(self, name_mapping: Dict[int, str]):
+        """
+        Assign names to person clusters
+
+        Args:
+            name_mapping: Dict mapping cluster_id -> person_name
+        """
+        if not hasattr(self, 'person_clusterer') or self.person_clusterer is None:
+            raise ValueError("Must run cluster_tracked_people() first")
+
+        self.person_clusterer.assign_person_names(name_mapping)
+
+        # Update database
+        if "person_clusters" in self.db.table_names():
+            cluster_table = self.db.open_table("person_clusters")
+            df = cluster_table.to_pandas()
+
+            for cluster_id, name in name_mapping.items():
+                df.loc[df["cluster_id"] == cluster_id, "person_name"] = name
+
+            # Recreate table with updated names
+            self.db.drop_table("person_clusters")
+            self.db.create_table("person_clusters", df.to_dict('records'))
+
+            print(f"✓ Updated {len(name_mapping)} person names in database")
+
+    def get_person_appearances(self, cluster_id: int) -> List[Dict]:
+        """
+        Get all appearances of a person across videos
+
+        Args:
+            cluster_id: Person cluster ID
+
+        Returns:
+            List of track dictionaries
+        """
+        if "person_clusters" not in self.db.table_names():
+            return []
+
+        cluster_table = self.db.open_table("person_clusters")
+        df = cluster_table.to_pandas()
+
+        # Get tracks for this cluster
+        cluster_tracks = df[df["cluster_id"] == cluster_id]
+
+        if len(cluster_tracks) == 0:
+            return []
+
+        # Get full track details
+        tracks_table = self.db.open_table("people_tracks")
+        all_tracks_df = tracks_table.to_pandas()
+
+        appearances = []
+        for _, row in cluster_tracks.iterrows():
+            track_id = row["track_id"]
+            video_id = row["video_id"]
+
+            track = all_tracks_df[
+                (all_tracks_df["track_id"] == track_id) &
+                (all_tracks_df["video_id"] == video_id)
+            ]
+
+            if len(track) > 0:
+                appearances.append(track.iloc[0].to_dict())
+
+        return appearances
+
+    def search_for_person(self, person_name: str) -> List[Dict]:
+        """
+        Search for all appearances of a named person
+
+        Args:
+            person_name: Person's name
+
+        Returns:
+            List of track dictionaries
+        """
+        if "person_clusters" not in self.db.table_names():
+            return []
+
+        cluster_table = self.db.open_table("person_clusters")
+        df = cluster_table.to_pandas()
+
+        # Find cluster(s) with this name
+        person_clusters = df[df["person_name"] == person_name]
+
+        if len(person_clusters) == 0:
+            return []
+
+        # Get all tracks for these clusters
+        all_appearances = []
+        for cluster_id in person_clusters["cluster_id"].unique():
+            appearances = self.get_person_appearances(int(cluster_id))
+            all_appearances.extend(appearances)
+
+        return all_appearances
+
+    def get_clustering_statistics(self) -> Dict:
+        """
+        Get statistics about person clustering
+
+        Returns:
+            Dictionary with clustering statistics
+        """
+        if not hasattr(self, 'person_clusterer') or self.person_clusterer is None:
+            return {
+                "num_unique_people": 0,
+                "total_tracks": 0,
+                "avg_tracks_per_person": 0
+            }
+
+        return self.person_clusterer.get_cluster_statistics()
+
+    def visualize_person_cluster(self,
+                                cluster_id: int,
+                                output_path: str,
+                                video_paths: Dict[str, str],
+                                max_images: int = 10):
+        """
+        Create visualization showing all appearances of a person
+
+        Args:
+            cluster_id: Person cluster ID
+            output_path: Where to save visualization
+            video_paths: Dict mapping video_id -> video_path
+            max_images: Maximum number of images to show
+        """
+        if not hasattr(self, 'person_clusterer') or self.person_clusterer is None:
+            raise ValueError("Must run cluster_tracked_people() first")
+
+        # Get tracks from database
+        appearances = self.get_person_appearances(cluster_id)
+
+        if not appearances:
+            print(f"No appearances found for cluster {cluster_id}")
+            return
+
+        # Build tracks dict
+        tracks_dict = {}
+        for app in appearances:
+            track = PersonTrack(
+                track_id=int(app["track_id"]),
+                video_id=app["video_id"],
+                first_frame=int(app["first_frame"]),
+                last_frame=int(app["last_frame"]),
+                first_timestamp=float(app["first_timestamp"]),
+                last_timestamp=float(app["last_timestamp"]),
+                bboxes=app["bboxes"],
+                frame_ids=app["frame_ids"],
+                timestamps=app["timestamps"],
+                confidences=app["confidences"]
+            )
+            tracks_dict[(track.track_id, track.video_id)] = track
+
+        # Create visualization
+        self.person_clusterer.visualize_cluster(
+            cluster_id=cluster_id,
+            video_paths=video_paths,
+            tracks_dict=tracks_dict,
+            output_path=output_path,
+            max_images=max_images
+        )
 
 
 def main():

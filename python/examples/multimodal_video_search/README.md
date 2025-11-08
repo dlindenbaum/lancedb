@@ -1,10 +1,11 @@
-# Hybrid Video Search with CLIP + DINOv3 + Face Recognition + People Tracking + LanceDB
+# Hybrid Video Search with CLIP + DINOv3 + Face Recognition + People Tracking + Person Clustering + LanceDB
 
 A comprehensive multimodal video search system that combines:
 - **CLIP (ONNX)**: Semantic text-to-image search ("American flag in background", "person wearing red")
 - **DINOv3 (ONNX)**: Fine-grained visual features for precise object localization
 - **Face Recognition**: Detect, recognize, and track faces using DeepFace
 - **People Tracking**: Track and identify people using YOLO (ONNX) + Roboflow Supervision
+- **Person Clustering**: Identify unique individuals across tracks and videos using face clustering
 - **LanceDB**: High-performance vector storage and retrieval
 
 **🚀 All models use ONNX Runtime for efficient, lightweight inference without PyTorch dependency!**
@@ -20,6 +21,9 @@ A comprehensive multimodal video search system that combines:
 - 📊 **Face Analytics**: Age, gender, and demographic analysis
 - 🚶 **People Tracking**: Track people across video with YOLO + ByteTrack
 - 🎭 **Person Identification**: Assign unique IDs to each person and track movement
+- 🧑‍🤝‍🧑 **Person Clustering**: Identify same person across different tracks using face recognition
+- 🔍 **Person Re-ID**: Re-identify people across multiple videos
+- 🏷️ **Person Naming**: Assign names to identified individuals
 - 📈 **Track Analytics**: Duration, frequency, and movement patterns
 - ⚡ **Fast & Scalable**: Built on LanceDB for efficient vector search
 - 🪶 **Lightweight**: ONNX models for efficient inference without heavy ML frameworks
@@ -201,6 +205,77 @@ stats = search.get_people_tracking_statistics(video_id="video_001")
 print(f"Total unique people: {stats['total_tracks']}")
 print(f"Average duration: {stats['avg_duration']:.2f}s")
 print(f"Longest appearance: {stats['max_duration']:.2f}s")
+```
+
+### 8. Person Clustering (Identify same person across tracks/videos)
+
+```python
+# Enable both tracking and face recognition
+search = HybridVideoSearch(
+    db_path="video_search.db",
+    use_people_tracking=True,  # Enable tracking
+    use_face_detection=True,   # Enable face recognition
+    face_model="Facenet512"
+)
+
+# Track people in multiple videos
+for video_id, video_path in [("vid1", "v1.mp4"), ("vid2", "v2.mp4")]:
+    search.track_people_in_video(
+        video_path=video_path,
+        video_id=video_id,
+        fps=2
+    )
+
+# Cluster tracked people to identify unique individuals
+video_paths = {"vid1": "v1.mp4", "vid2": "v2.mp4"}
+clusters = search.cluster_tracked_people(
+    video_ids=["vid1", "vid2"],
+    video_paths=video_paths,
+    similarity_threshold=0.6,  # Face similarity threshold
+    clustering_method="dbscan",  # or "agglomerative"
+    save_clusters=True
+)
+
+print(f"Found {len(clusters)} unique people")
+
+# Assign names to identified people
+search.assign_person_names({
+    0: "John Doe",
+    1: "Jane Smith",
+    2: "Bob Johnson"
+})
+
+# Search for a specific person by name
+appearances = search.search_for_person("John Doe")
+print(f"John Doe appears in {len(appearances)} tracks")
+
+# Identify a person from a photo
+result = search.identify_person_from_image(
+    query_image="person_photo.jpg",
+    min_similarity=0.6
+)
+
+if result:
+    print(f"Matched: {result['person_name']}")
+    print(f"Similarity: {result['similarity']:.3f}")
+    print(f"Appears in {result['num_videos']} videos")
+
+# Get all appearances of a person
+person_appearances = search.get_person_appearances(cluster_id=0)
+
+# Visualize a person's appearances across videos
+search.visualize_person_cluster(
+    cluster_id=0,
+    output_path="person_0_grid.jpg",
+    video_paths=video_paths,
+    max_images=10
+)
+
+# Get clustering statistics
+stats = search.get_clustering_statistics()
+print(f"Unique people: {stats['num_clusters']}")
+print(f"Avg tracks per person: {stats['avg_tracks_per_person']:.1f}")
+print(f"Avg videos per person: {stats['avg_videos_per_person']:.1f}")
 ```
 
 ## Usage Examples
