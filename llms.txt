@@ -1,0 +1,183 @@
+# LanceDB
+
+> LanceDB is a serverless, low-latency vector database for multimodal AI applications. Built on the Lance columnar format, it provides fast vector search, full-text search, and SQL queries over billions of vectors. Available as an embedded (in-process) database or as a cloud service, with primary support for Python, plus TypeScript, Rust, and Java.
+
+LanceDB is designed for production-ready AI/ML workloads, offering:
+- **Multi-modal data storage**: vectors, text, images, videos, point clouds, and metadata
+- **Comprehensive search**: vector similarity search, full-text search, hybrid search, and SQL queries via DataFusion
+- **Zero-copy operations**: efficient data access without serialization overhead
+- **Automatic versioning**: built-in data version management
+- **Two deployment modes**: Local embedded (like SQLite) or cloud-hosted (LanceDB Cloud)
+
+## Architecture
+
+LanceDB consists of:
+1. **Rust Core** (`rust/lancedb`): The main implementation built on Lance columnar format with two table types:
+   - `NativeTable`: Local in-process tables
+   - `RemoteTable`: Cloud-based tables accessed via HTTP API
+2. **Python Bindings** (`python`): PyO3-based bindings providing both sync and async APIs
+   - `AsyncTable`: Async methods for non-blocking operations
+   - `LanceTable`: Sync methods using event loop
+   - `RemoteTable`: Cloud table access
+3. **Other Language Bindings**: TypeScript/Node.js (napi-rs) and Java (JNI)
+4. **Storage Layer**: Lance columnar format with support for local filesystems and cloud object stores (S3, GCS, Azure)
+5. **Query Engine**: Integrated with Apache DataFusion for SQL execution
+
+## Core Concepts
+
+- **Tables**: The primary data structure, supporting schema evolution and ACID transactions
+- **Embeddings**: Built-in support for OpenAI, Sentence Transformers, AWS Bedrock, and custom embedding functions
+- **Indexes**: Vector indexes (IVF, HNSW) and full-text indexes for optimized search
+- **Rerankers**: Post-processing search results with various reranking algorithms (Cohere, Cross Encoder, etc.)
+- **Hybrid Search**: Combining vector similarity and full-text search with configurable fusion strategies
+- **Pydantic Integration**: Type-safe schema definition using Pydantic models
+
+## Python Installation
+
+```
+pip install lancedb
+```
+
+## Python Quick Start
+
+https://lancedb.github.io/lancedb/basic/
+
+## Python API Reference
+
+https://lancedb.github.io/lancedb/python/python/
+
+## Python-Specific Features
+
+### Pydantic Support
+https://lancedb.github.io/lancedb/python/pydantic/
+
+### Async/Sync APIs
+https://lancedb.github.io/lancedb/python/python/
+
+### GPU Acceleration
+https://lancedb.github.io/lancedb/concepts/vector_search/
+
+## API References (Other Languages)
+
+### TypeScript/JavaScript API
+https://lancedb.github.io/lancedb/js/globals/
+
+### Rust API
+https://docs.rs/lancedb/latest/lancedb/
+
+### REST API
+https://docs.lancedb.com/api-reference/introduction
+
+## Core Concepts & Guides
+
+### Embeddings
+https://lancedb.github.io/lancedb/embeddings/
+
+### Full-Text Search
+https://lancedb.github.io/lancedb/fts/
+
+### Hybrid Search
+https://lancedb.github.io/lancedb/hybrid_search/overview/
+
+### Vector Indexing
+https://lancedb.github.io/lancedb/concepts/vector_search/
+
+### Reranking
+https://lancedb.github.io/lancedb/reranking/
+
+### SQL Support
+https://lancedb.github.io/lancedb/sql/
+
+## Python Integration Guides
+
+### LangChain Integration
+https://python.langchain.com/docs/integrations/vectorstores/lancedb/
+https://lancedb.github.io/lancedb/python/langchain/
+
+### LlamaIndex Integration
+https://gpt-index.readthedocs.io/en/latest/examples/vector_stores/LanceDBIndexDemo.html
+https://lancedb.github.io/lancedb/python/llamaindex/
+
+### Pandas & Polars
+https://lancedb.github.io/lancedb/guides/tables/
+
+### DuckDB
+https://lancedb.github.io/lancedb/integrations/duckdb/
+
+### Instructor
+https://lancedb.github.io/lancedb/python/instructor/
+
+### Voxel51
+https://lancedb.github.io/lancedb/integrations/voxel51/
+
+## RAG & Advanced Patterns
+
+https://lancedb.github.io/lancedb/rag/
+
+## Key Python Source Files
+
+### Python Package Core
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/__init__.py
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/table.py
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/db.py
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/query.py
+
+### Python Embeddings
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/embeddings/registry.py
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/embeddings/base.py
+
+### Python Integrations
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/pydantic.py
+https://github.com/lancedb/lancedb/blob/main/python/python/lancedb/fts.py
+
+### PyO3 Bindings (Rust-Python interface)
+https://github.com/lancedb/lancedb/blob/main/python/src/lib.rs
+https://github.com/lancedb/lancedb/blob/main/python/src/table.rs
+https://github.com/lancedb/lancedb/blob/main/python/src/database.rs
+
+## Key Source Files (Other Languages)
+
+### Rust Core Implementation
+https://github.com/lancedb/lancedb/blob/main/rust/lancedb/src/lib.rs
+https://github.com/lancedb/lancedb/blob/main/rust/lancedb/src/table.rs
+https://github.com/lancedb/lancedb/blob/main/rust/lancedb/src/query.rs
+https://github.com/lancedb/lancedb/blob/main/rust/lancedb/src/connection.rs
+
+### TypeScript Package
+https://github.com/lancedb/lancedb/blob/main/nodejs/lancedb/connection.ts
+https://github.com/lancedb/lancedb/blob/main/nodejs/lancedb/table.ts
+https://github.com/lancedb/lancedb/blob/main/nodejs/lancedb/query.ts
+
+## Developer Resources
+
+### Contributing Guide
+https://github.com/lancedb/lancedb/blob/main/CONTRIBUTING.md
+
+### Project Guidelines (CLAUDE.md)
+https://github.com/lancedb/lancedb/blob/main/CLAUDE.md
+
+### Example Code & Recipes
+https://github.com/lancedb/vectordb-recipes
+
+## LanceDB Cloud
+
+https://lancedb.com
+https://cloud.lancedb.com
+
+## Optional
+
+### Community
+
+Discord: https://discord.gg/zMM32dvNtd
+Twitter: https://twitter.com/lancedb
+LinkedIn: https://www.linkedin.com/company/lancedb/
+Blog: https://blog.lancedb.com/
+
+### Related Projects
+
+Lance Columnar Format: https://github.com/lancedb/lance
+Python Vector DB Recipes: https://github.com/lancedb/vectordb-recipes
+
+### Research & Benchmarks
+
+LanceDB Performance Benchmarks: https://blog.lancedb.com/benchmarking-lancedb-92b01032874a
